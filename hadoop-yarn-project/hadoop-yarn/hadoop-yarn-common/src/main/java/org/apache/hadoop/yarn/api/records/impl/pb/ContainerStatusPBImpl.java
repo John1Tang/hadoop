@@ -25,6 +25,7 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
+import org.apache.hadoop.yarn.api.records.ContainerSubState;
 import org.apache.hadoop.yarn.api.records.ExecutionType;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.proto.YarnProtos;
@@ -51,6 +52,7 @@ public class ContainerStatusPBImpl extends ContainerStatus {
   private ContainerId containerId = null;
   private static final String HOST = "HOST";
   private static final String IPS = "IPS";
+  private static final String PORTS = "PORTS";
   private Map<String, String> containerAttributes = new HashMap<>();
 
 
@@ -88,16 +90,18 @@ public class ContainerStatusPBImpl extends ContainerStatus {
   @Override
   public String toString() {
     StringBuilder sb = new StringBuilder();
-    sb.append("ContainerStatus: [");
-    sb.append("ContainerId: ").append(getContainerId()).append(", ");
-    sb.append("ExecutionType: ").append(getExecutionType()).append(", ");
-    sb.append("State: ").append(getState()).append(", ");
-    sb.append("Capability: ").append(getCapability()).append(", ");
-    sb.append("Diagnostics: ").append(getDiagnostics()).append(", ");
-    sb.append("ExitStatus: ").append(getExitStatus()).append(", ");
-    sb.append("IP: ").append(getIPs()).append(", ");
-    sb.append("Host: ").append(getHost());
-    sb.append("]");
+    sb.append("ContainerStatus: [")
+        .append("ContainerId: ").append(getContainerId()).append(", ")
+        .append("ExecutionType: ").append(getExecutionType()).append(", ")
+        .append("State: ").append(getState()).append(", ")
+        .append("Capability: ").append(getCapability()).append(", ")
+        .append("Diagnostics: ").append(getDiagnostics()).append(", ")
+        .append("ExitStatus: ").append(getExitStatus()).append(", ")
+        .append("IP: ").append(getIPs()).append(", ")
+        .append("Host: ").append(getHost()).append(", ")
+        .append("ExposedPorts: ").append(getExposedPorts()).append(", ")
+        .append("ContainerSubState: ").append(getContainerSubState())
+        .append("]");
     return sb.toString();
   }
 
@@ -180,7 +184,7 @@ public class ContainerStatusPBImpl extends ContainerStatus {
   public synchronized ExecutionType getExecutionType() {
     ContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
     if (!p.hasExecutionType()) {
-      return null;
+      return ExecutionType.GUARANTEED;
     }
     return convertFromProtoFormat(p.getExecutionType());
   }
@@ -213,6 +217,26 @@ public class ContainerStatusPBImpl extends ContainerStatus {
     }
     builder.setState(convertToProtoFormat(state));
   }
+
+  @Override
+  public synchronized ContainerSubState getContainerSubState() {
+    ContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
+    if (!p.hasContainerSubState()) {
+      return null;
+    }
+    return ProtoUtils.convertFromProtoFormat(p.getContainerSubState());
+  }
+
+  @Override
+  public synchronized void setContainerSubState(ContainerSubState subState) {
+    maybeInitBuilder();
+    if (subState == null) {
+      builder.clearContainerSubState();
+      return;
+    }
+    builder.setContainerSubState(ProtoUtils.convertToProtoFormat(subState));
+  }
+
   @Override
   public synchronized ContainerId getContainerId() {
     ContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
@@ -297,6 +321,25 @@ public class ContainerStatusPBImpl extends ContainerStatus {
   }
 
   @Override
+  public synchronized String getExposedPorts() {
+    if (!containerAttributes.containsKey(PORTS)) {
+      initContainerAttributes();
+    }
+    String ports = containerAttributes.get((PORTS));
+    return ports == null ? "" : ports;
+  }
+
+  @Override
+  public synchronized void setExposedPorts(String ports) {
+    maybeInitBuilder();
+    if (ports == null) {
+      containerAttributes.remove(PORTS);
+      return;
+    }
+    containerAttributes.put(PORTS, ports);
+  }
+
+  @Override
   public synchronized String getHost() {
     if (containerAttributes.get(HOST) == null) {
       initContainerAttributes();
@@ -339,7 +382,7 @@ public class ContainerStatusPBImpl extends ContainerStatus {
   }
 
   private ResourceProto convertToProtoFormat(Resource e) {
-    return ((ResourcePBImpl)e).getProto();
+    return ProtoUtils.convertToProtoFormat(e);
   }
 
   private ResourcePBImpl convertFromProtoFormat(ResourceProto p) {

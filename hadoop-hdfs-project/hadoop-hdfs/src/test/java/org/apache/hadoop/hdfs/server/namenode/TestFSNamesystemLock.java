@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.hdfs.server.namenode;
 
-import com.google.common.base.Supplier;
+import java.util.function.Supplier;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
@@ -28,7 +28,7 @@ import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.GenericTestUtils.LogCapturer;
 import org.apache.hadoop.test.MetricsAsserts;
 import org.apache.hadoop.util.FakeTimer;
-import org.apache.log4j.Level;
+import org.apache.hadoop.util.Time;
 import org.junit.Test;
 
 import java.io.IOException;
@@ -38,8 +38,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
+import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
 
 import static org.junit.Assert.*;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_FSLOCK_FAIR_KEY;
 import static org.apache.hadoop.test.MetricsAsserts.assertCounter;
 import static org.apache.hadoop.test.MetricsAsserts.assertGauge;
 
@@ -53,11 +56,11 @@ public class TestFSNamesystemLock {
   public void testFsLockFairness() throws IOException, InterruptedException{
     Configuration conf = new Configuration();
 
-    conf.setBoolean("dfs.namenode.fslock.fair", true);
+    conf.setBoolean(DFS_NAMENODE_FSLOCK_FAIR_KEY, true);
     FSNamesystemLock fsnLock = new FSNamesystemLock(conf, null);
     assertTrue(fsnLock.coarseLock.isFair());
 
-    conf.setBoolean("dfs.namenode.fslock.fair", false);
+    conf.setBoolean(DFS_NAMENODE_FSLOCK_FAIR_KEY, false);
     fsnLock = new FSNamesystemLock(conf, null);
     assertFalse(fsnLock.coarseLock.isFair());
   }
@@ -103,7 +106,7 @@ public class TestFSNamesystemLock {
     final int threadCount = 3;
     final CountDownLatch latch = new CountDownLatch(threadCount);
     final Configuration conf = new Configuration();
-    conf.setBoolean("dfs.namenode.fslock.fair", true);
+    conf.setBoolean(DFS_NAMENODE_FSLOCK_FAIR_KEY, true);
     final FSNamesystemLock rwLock = new FSNamesystemLock(conf, null);
     rwLock.writeLock();
     ExecutorService helper = Executors.newFixedThreadPool(threadCount);
@@ -200,7 +203,15 @@ public class TestFSNamesystemLock {
     timer.advance(writeLockReportingThreshold + 100);
     logs.clearOutput();
     fsnLock.writeUnlock();
+    // look for the method name in the stack trace
     assertTrue(logs.getOutput().contains(GenericTestUtils.getMethodName()));
+    // find the held interval time in the log
+    Pattern pattern = Pattern.compile(".*[\n].*\\d+ms(.*[\n].*){1,}");
+    assertTrue(pattern.matcher(logs.getOutput()).find());
+    // only keep the "yyyy-MM-dd" part of date
+    String startTimeStr =
+        "held at " + Time.formatTime(timer.now()).substring(0, 10);
+    assertTrue(logs.getOutput().contains(startTimeStr));
     assertTrue(logs.getOutput().contains(
         "Number of suppressed write-lock reports: 2"));
   }
@@ -213,7 +224,7 @@ public class TestFSNamesystemLock {
   public void testFSReadLockLongHoldingReport() throws Exception {
     final long readLockReportingThreshold = 100L;
     final long readLockSuppressWarningInterval = 10000L;
-    final String readLockLogStmt = "FSNamesystem read lock held for ";
+    final String readLockLogStmt = "Number of suppressed read-lock reports";
     Configuration conf = new Configuration();
     conf.setLong(
         DFSConfigKeys.DFS_NAMENODE_READ_LOCK_REPORTING_THRESHOLD_MS_KEY,
@@ -254,6 +265,18 @@ public class TestFSNamesystemLock {
     // Track but do not Report if it's held for a long time when re-entering
     // read lock but time since last report does not exceed the suppress
     // warning interval
+    Thread tLong = new Thread() {
+      @Override
+      public void run() {
+        fsnLock.readLock();
+        // Add one lock hold which is the longest, but occurs under a different
+        // stack trace, to ensure this is the one that gets logged
+        timer.advance(readLockReportingThreshold + 20);
+        fsnLock.readUnlock();
+      }
+    };
+    tLong.start();
+    tLong.join();
     fsnLock.readLock();
     timer.advance(readLockReportingThreshold / 2 + 1);
     fsnLock.readLock();
@@ -266,6 +289,22 @@ public class TestFSNamesystemLock {
     fsnLock.readUnlock();
     assertFalse(logs.getOutput().contains(GenericTestUtils.getMethodName()) &&
         logs.getOutput().contains(readLockLogStmt));
+    timer.advance(readLockSuppressWarningInterval);
+    fsnLock.readLock();
+    timer.advance(readLockReportingThreshold + 1);
+    fsnLock.readUnlock();
+    // Assert that stack trace eventually logged is the one for the longest hold
+    String stackTracePatternString =
+        String.format("INFO.+%s(.+\n){5}\\Q%%s\\E\\.run", readLockLogStmt);
+    Pattern tLongPattern = Pattern.compile(
+        String.format(stackTracePatternString, tLong.getClass().getName()));
+    assertTrue(tLongPattern.matcher(logs.getOutput()).find());
+    // only keep the "yyyy-MM-dd" part of date
+    String startTimeStr =
+        "held at " + Time.formatTime(timer.now()).substring(0, 10);
+    assertTrue(logs.getOutput().contains(startTimeStr));
+    assertTrue(logs.getOutput().contains(
+        "Number of suppressed read-lock reports: 3"));
 
     // Report if it's held for a long time (and time since last report
     // exceeds the suppress warning interval) while another thread also has the
@@ -308,16 +347,15 @@ public class TestFSNamesystemLock {
     t1.join();
     t2.join();
     // Look for the differentiating class names in the stack trace
-    String stackTracePatternString =
-        String.format("INFO.+%s(.+\n){5}\\Q%%s\\E\\.run", readLockLogStmt);
     Pattern t1Pattern = Pattern.compile(
         String.format(stackTracePatternString, t1.getClass().getName()));
     assertTrue(t1Pattern.matcher(logs.getOutput()).find());
     Pattern t2Pattern = Pattern.compile(
         String.format(stackTracePatternString, t2.getClass().getName()));
     assertFalse(t2Pattern.matcher(logs.getOutput()).find());
-    assertTrue(logs.getOutput().contains(
-        "Number of suppressed read-lock reports: 2"));
+    // match the held interval time in the log
+    Pattern pattern = Pattern.compile(".*[\n].*\\d+ms(.*[\n].*){1,}");
+    assertTrue(pattern.matcher(logs.getOutput()).find());
   }
 
   @Test
@@ -331,10 +369,10 @@ public class TestFSNamesystemLock {
     FSNamesystemLock fsLock = new FSNamesystemLock(conf, rates, timer);
 
     fsLock.readLock();
-    timer.advance(1);
+    timer.advanceNanos(1300000);
     fsLock.readUnlock("foo");
     fsLock.readLock();
-    timer.advance(2);
+    timer.advanceNanos(2400000);
     fsLock.readUnlock("foo");
 
     fsLock.readLock();
@@ -346,17 +384,65 @@ public class TestFSNamesystemLock {
 
     fsLock.writeLock();
     timer.advance(1);
-    fsLock.writeUnlock("baz");
+    fsLock.writeUnlock("baz", false);
 
     MetricsRecordBuilder rb = MetricsAsserts.mockMetricsRecordBuilder();
     rates.snapshot(rb, true);
 
-    assertGauge("FSNReadLockFooAvgTime", 1.5, rb);
-    assertCounter("FSNReadLockFooNumOps", 2L, rb);
-    assertGauge("FSNReadLockBarAvgTime", 2.0, rb);
-    assertCounter("FSNReadLockBarNumOps", 1L, rb);
-    assertGauge("FSNWriteLockBazAvgTime", 1.0, rb);
-    assertCounter("FSNWriteLockBazNumOps", 1L, rb);
+    assertGauge("FSNReadLockFooNanosAvgTime", 1850000.0, rb);
+    assertCounter("FSNReadLockFooNanosNumOps", 2L, rb);
+    assertGauge("FSNReadLockBarNanosAvgTime", 2000000.0, rb);
+    assertCounter("FSNReadLockBarNanosNumOps", 1L, rb);
+    assertGauge("FSNWriteLockBazNanosAvgTime", 1000000.0, rb);
+    assertCounter("FSNWriteLockBazNanosNumOps", 1L, rb);
+
+    // Overall
+    assertGauge("FSNReadLockOverallNanosAvgTime", 1900000.0, rb);
+    assertCounter("FSNReadLockOverallNanosNumOps", 3L, rb);
+    assertGauge("FSNWriteLockOverallNanosAvgTime", 1000000.0, rb);
+    assertCounter("FSNWriteLockOverallNanosNumOps", 1L, rb);
+  }
+
+  /**
+   * Test to suppress FSNameSystem write lock report when it is held for long
+   * time.
+   */
+  @Test(timeout = 45000)
+  public void testFSWriteLockReportSuppressed() throws Exception {
+    final long writeLockReportingThreshold = 1L;
+    final long writeLockSuppressWarningInterval = 10L;
+    Configuration conf = new Configuration();
+    conf.setLong(
+        DFSConfigKeys.DFS_NAMENODE_WRITE_LOCK_REPORTING_THRESHOLD_MS_KEY,
+        writeLockReportingThreshold);
+    conf.setTimeDuration(DFSConfigKeys.DFS_LOCK_SUPPRESS_WARNING_INTERVAL_KEY,
+        writeLockSuppressWarningInterval, TimeUnit.MILLISECONDS);
+
+    final FakeTimer timer = new FakeTimer();
+    final FSNamesystemLock fsnLock = new FSNamesystemLock(conf, null, timer);
+    timer.advance(writeLockSuppressWarningInterval);
+
+    LogCapturer logs = LogCapturer.captureLogs(FSNamesystem.LOG);
+    GenericTestUtils
+        .setLogLevel(LoggerFactory.getLogger(FSNamesystem.class.getName()),
+            org.slf4j.event.Level.INFO);
+
+    // Should trigger the write lock report
+    fsnLock.writeLock();
+    timer.advance(writeLockReportingThreshold + 100);
+    fsnLock.writeUnlock();
+    assertTrue(logs.getOutput().contains(
+        "Number of suppressed write-lock reports"));
+
+    logs.clearOutput();
+
+    // Suppress report if the write lock is held for a long time
+    fsnLock.writeLock();
+    timer.advance(writeLockReportingThreshold + 100);
+    fsnLock.writeUnlock("testFSWriteLockReportSuppressed", true);
+    assertFalse(logs.getOutput().contains(GenericTestUtils.getMethodName()));
+    assertFalse(logs.getOutput().contains(
+        "Number of suppressed write-lock reports:"));
   }
 
 }

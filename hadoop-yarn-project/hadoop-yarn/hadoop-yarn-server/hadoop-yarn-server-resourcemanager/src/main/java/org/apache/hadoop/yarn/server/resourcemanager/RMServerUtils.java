@@ -21,14 +21,18 @@ package org.apache.hadoop.yarn.server.resourcemanager;
 import java.io.IOException;
 import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
+import com.google.common.collect.Sets;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -41,6 +45,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationTimeoutType;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerUpdateType;
 import org.apache.hadoop.yarn.api.records.ExecutionType;
+import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -84,13 +89,16 @@ import org.apache.hadoop.yarn.util.resource.Resources;
  */
 public class RMServerUtils {
 
+  private static final Logger LOG_HANDLE =
+      LoggerFactory.getLogger(RMServerUtils.class);
+
   public static final String UPDATE_OUTSTANDING_ERROR =
       "UPDATE_OUTSTANDING_ERROR";
   private static final String INCORRECT_CONTAINER_VERSION_ERROR =
       "INCORRECT_CONTAINER_VERSION_ERROR";
   private static final String INVALID_CONTAINER_ID =
       "INVALID_CONTAINER_ID";
-  private static final String RESOURCE_OUTSIDE_ALLOWED_RANGE =
+  public static final String RESOURCE_OUTSIDE_ALLOWED_RANGE =
       "RESOURCE_OUTSIDE_ALLOWED_RANGE";
 
   protected static final RecordFactory RECORD_FACTORY =
@@ -102,10 +110,20 @@ public class RMServerUtils {
       EnumSet<NodeState> acceptedStates) {
     // nodes contains nodes that are NEW, RUNNING, UNHEALTHY or DECOMMISSIONING.
     ArrayList<RMNode> results = new ArrayList<RMNode>();
-    if (acceptedStates.contains(NodeState.NEW) ||
-        acceptedStates.contains(NodeState.RUNNING) ||
-        acceptedStates.contains(NodeState.DECOMMISSIONING) ||
-        acceptedStates.contains(NodeState.UNHEALTHY)) {
+    boolean hasActive = false;
+    boolean hasInactive = false;
+    for (NodeState nodeState : acceptedStates) {
+      if (!hasInactive && nodeState.isInactiveState()) {
+        hasInactive = true;
+      }
+      if (!hasActive && nodeState.isActiveState()) {
+        hasActive = true;
+      }
+      if (hasActive && hasInactive) {
+        break;
+      }
+    }
+    if (hasActive) {
       for (RMNode rmNode : context.getRMNodes().values()) {
         if (acceptedStates.contains(rmNode.getState())) {
           results.add(rmNode);
@@ -114,9 +132,7 @@ public class RMServerUtils {
     }
 
     // inactiveNodes contains nodes that are DECOMMISSIONED, LOST, OR REBOOTED
-    if (acceptedStates.contains(NodeState.DECOMMISSIONED) ||
-        acceptedStates.contains(NodeState.LOST) ||
-        acceptedStates.contains(NodeState.REBOOTED)) {
+    if (hasInactive) {
       for (RMNode rmNode : context.getInactiveRMNodes().values()) {
         if ((rmNode != null) && acceptedStates.contains(rmNode.getState())) {
           results.add(rmNode);
@@ -224,23 +240,25 @@ public class RMServerUtils {
   }
 
   /**
-   * Utility method to validate a list resource requests, by insuring that the
+   * Utility method to validate a list resource requests, by ensuring that the
    * requested memory/vcore is non-negative and not greater than max
    */
   public static void normalizeAndValidateRequests(List<ResourceRequest> ask,
-      Resource maximumResource, String queueName, YarnScheduler scheduler,
-      RMContext rmContext)
-      throws InvalidResourceRequestException {
+      Resource maximumAllocation, String queueName, YarnScheduler scheduler,
+      RMContext rmContext, boolean nodeLabelsEnabled)
+          throws InvalidResourceRequestException {
     // Get queue from scheduler
     QueueInfo queueInfo = null;
     try {
       queueInfo = scheduler.getQueueInfo(queueName, false, false);
     } catch (IOException e) {
+      //Queue may not exist since it could be auto-created in case of
+      // dynamic queues
     }
 
     for (ResourceRequest resReq : ask) {
-      SchedulerUtils.normalizeAndvalidateRequest(resReq, maximumResource,
-          queueName, scheduler, rmContext, queueInfo);
+      SchedulerUtils.normalizeAndValidateRequest(resReq, maximumAllocation,
+          queueName, rmContext, queueInfo, nodeLabelsEnabled);
     }
   }
 
@@ -291,8 +309,7 @@ public class RMServerUtils {
     // Target resource of the increase request is more than NM can offer
     ResourceScheduler scheduler = rmContext.getScheduler();
     RMNode rmNode = request.getSchedulerNode().getRMNode();
-    if (!Resources.fitsIn(scheduler.getResourceCalculator(),
-        scheduler.getClusterResource(), targetResource,
+    if (!Resources.fitsIn(scheduler.getResourceCalculator(), targetResource,
         rmNode.getTotalCapability())) {
       String msg = "Target resource=" + targetResource + " of containerId="
           + containerId + " is more than node's total resource="
@@ -331,7 +348,8 @@ public class RMServerUtils {
       return false;
     }
     ResourceScheduler scheduler = rmContext.getScheduler();
-    request.setCapability(scheduler.getNormalizedResource(request.getCapability()));
+    request.setCapability(scheduler
+        .getNormalizedResource(request.getCapability(), maximumAllocation));
     return true;
   }
 
@@ -361,7 +379,7 @@ public class RMServerUtils {
   }
 
   public static UserGroupInformation verifyAdminAccess(
-      YarnAuthorizationProvider authorizer, String method, final Log LOG)
+      YarnAuthorizationProvider authorizer, String method, final Logger LOG)
       throws IOException {
     // by default, this method will use AdminService as module name
     return verifyAdminAccess(authorizer, method, "AdminService", LOG);
@@ -380,7 +398,7 @@ public class RMServerUtils {
    */
   public static UserGroupInformation verifyAdminAccess(
       YarnAuthorizationProvider authorizer, String method, String module,
-      final Log LOG)
+      final Logger LOG)
       throws IOException {
     UserGroupInformation user;
     try {
@@ -474,7 +492,7 @@ public class RMServerUtils {
       DUMMY_APPLICATION_RESOURCE_USAGE_REPORT =
       BuilderUtils.newApplicationResourceUsageReport(-1, -1,
           Resources.createResource(-1, -1), Resources.createResource(-1, -1),
-          Resources.createResource(-1, -1), 0, 0, 0, 0);
+          Resources.createResource(-1, -1), new HashMap<>(), new HashMap<>());
 
 
   /**
@@ -557,19 +575,73 @@ public class RMServerUtils {
    *
    * @param rmContext context
    * @param conf configuration
-   * @param amreq am resource request
+   * @param amReqs am resource requests
    * @return applicable node count
    */
   public static int getApplicableNodeCountForAM(RMContext rmContext,
-      Configuration conf, ResourceRequest amreq) {
-    if (YarnConfiguration.areNodeLabelsEnabled(conf)) {
-      RMNodeLabelsManager labelManager = rmContext.getNodeLabelManager();
-      String amNodeLabelExpression = amreq.getNodeLabelExpression();
-      amNodeLabelExpression = (amNodeLabelExpression == null
-          || amNodeLabelExpression.trim().isEmpty())
-              ? RMNodeLabelsManager.NO_LABEL : amNodeLabelExpression;
-      return labelManager.getActiveNMCountPerLabel(amNodeLabelExpression);
+      Configuration conf, List<ResourceRequest> amReqs) {
+    // Determine the list of nodes that are eligible based on the strict
+    // resource requests
+    Set<NodeId> nodesForReqs = new HashSet<>();
+    for (ResourceRequest amReq : amReqs) {
+      if (amReq.getRelaxLocality() &&
+          !amReq.getResourceName().equals(ResourceRequest.ANY)) {
+        nodesForReqs.addAll(
+            rmContext.getScheduler().getNodeIds(amReq.getResourceName()));
+      }
     }
-    return rmContext.getScheduler().getNumClusterNodes();
+
+    if (YarnConfiguration.areNodeLabelsEnabled(conf)) {
+      // Determine the list of nodes that are eligible based on the node label
+      String amNodeLabelExpression = amReqs.get(0).getNodeLabelExpression();
+      Set<NodeId> nodesForLabels =
+          getNodeIdsForLabel(rmContext, amNodeLabelExpression);
+      if (nodesForLabels != null && !nodesForLabels.isEmpty()) {
+        // If only node labels, strip out any wildcard NodeIds and return
+        if (nodesForReqs.isEmpty()) {
+          for (Iterator<NodeId> it = nodesForLabels.iterator(); it.hasNext();) {
+            if (it.next().getPort() == 0) {
+              it.remove();
+            }
+          }
+          return nodesForLabels.size();
+        } else {
+          // The NodeIds common to both the strict resource requests and the
+          // node label is the eligible set
+          return Sets.intersection(nodesForReqs, nodesForLabels).size();
+        }
+      }
+    }
+
+    // If no strict resource request NodeIds nor node label NodeIds, then just
+    // return the entire cluster
+    if (nodesForReqs.isEmpty()) {
+      return rmContext.getScheduler().getNumClusterNodes();
+    }
+    // No node label NodeIds, so return the strict resource request NodeIds
+    return nodesForReqs.size();
+  }
+
+  private static Set<NodeId> getNodeIdsForLabel(RMContext rmContext,
+      String label) {
+    label = (label == null || label.trim().isEmpty())
+        ? RMNodeLabelsManager.NO_LABEL : label;
+    if (label.equals(RMNodeLabelsManager.NO_LABEL)) {
+      // NO_LABEL nodes aren't tracked directly
+      return rmContext.getNodeLabelManager().getNodesWithoutALabel();
+    } else {
+      Map<String, Set<NodeId>> labelsToNodes =
+          rmContext.getNodeLabelManager().getLabelsToNodes(
+              Collections.singleton(label));
+      return labelsToNodes.get(label);
+    }
+  }
+
+  public static Long getOrDefault(Map<String, Long> map, String key,
+      Long defaultValue) {
+    if (map.containsKey(key)) {
+      return map.get(key);
+    }
+    return defaultValue;
   }
 }

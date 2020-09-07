@@ -52,6 +52,15 @@ public interface ContractOptions {
   String CREATE_VISIBILITY_DELAYED = "create-visibility-delayed";
 
   /**
+   * Flag to indicate that it is possible to create a file under a file.
+   * This is a complete violation of the filesystem rules, but it is one
+   * which object stores have been known to do for performance
+   * <i>and because nobody has ever noticed.</i>
+   * {@value}
+   */
+  String CREATE_FILE_UNDER_FILE_ALLOWED = "create-file-under-file-allowed";
+
+  /**
    * Is a filesystem case sensitive.
    * Some of the filesystems that say "no" here may mean
    * that it varies from platform to platform -the localfs being the key
@@ -190,6 +199,21 @@ public interface ContractOptions {
    * {@value}
    */
   String SUPPORTS_POSITIONED_READABLE = "supports-positioned-readable";
+
+  /**
+   * Indicates that FS exposes durable references to files.
+   */
+  String SUPPORTS_FILE_REFERENCE = "supports-file-reference";
+
+  /**
+   * Indicates that FS supports content checks on open.
+   */
+  String SUPPORTS_CONTENT_CHECK = "supports-content-check";
+
+  /**
+   * Indicates that FS supports unbuffer.
+   */
+  String SUPPORTS_UNBUFFER = "supports-unbuffer";
 
   /**
    * Maximum path length

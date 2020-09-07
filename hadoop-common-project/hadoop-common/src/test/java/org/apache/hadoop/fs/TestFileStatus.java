@@ -33,16 +33,17 @@ import java.util.Collections;
 import java.util.List;
 
 import org.junit.Test;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class TestFileStatus {
 
-  private static final Log LOG =
-    LogFactory.getLog(TestFileStatus.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestFileStatus.class);
   
   /** Values for creating {@link FileStatus} in some tests */
   static final int LENGTH = 1;
@@ -295,11 +296,15 @@ public class TestFileStatus {
     expected.append("permission=").append(fileStatus.getPermission()).append("; ");
     if(fileStatus.isSymlink()) {
       expected.append("isSymlink=").append(true).append("; ");
-      expected.append("symlink=").append(fileStatus.getSymlink()).append("}");
+      expected.append("symlink=").append(fileStatus.getSymlink()).append("; ");
     } else {
-      expected.append("isSymlink=").append(false).append("}");
+      expected.append("isSymlink=").append(false).append("; ");
     }
-    
+    expected.append("hasAcl=").append(fileStatus.hasAcl()).append("; ");
+    expected.append("isEncrypted=").append(
+        fileStatus.isEncrypted()).append("; ");
+    expected.append("isErasureCoded=").append(
+        fileStatus.isErasureCoded()).append("}");
     assertEquals(expected.toString(), fileStatus.toString());
   }
 }

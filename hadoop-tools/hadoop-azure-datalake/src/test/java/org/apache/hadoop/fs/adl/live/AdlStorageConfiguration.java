@@ -35,7 +35,7 @@ public final class AdlStorageConfiguration {
   static final String CONTRACT_XML = "adls.xml";
 
   private static final String CONTRACT_ENABLE_KEY =
-      "dfs.adl.test.contract.enable";
+      "fs.adl.test.contract.enable";
   private static final boolean CONTRACT_ENABLE_DEFAULT = false;
 
   private static final String FILE_SYSTEM_KEY =
@@ -48,6 +48,12 @@ public final class AdlStorageConfiguration {
 
   private static boolean isContractTestEnabled = false;
   private static Configuration conf = null;
+
+  static {
+    Configuration.addDeprecation("dfs.adl.test.contract.enable",
+        CONTRACT_ENABLE_KEY);
+    Configuration.reloadExistingConfigurations();
+  }
 
   private AdlStorageConfiguration() {
   }
@@ -73,20 +79,24 @@ public final class AdlStorageConfiguration {
     if (conf == null) {
       conf = getConfiguration();
     }
+    return createStorageConnector(conf);
+  }
 
+  public synchronized static FileSystem createStorageConnector(
+      Configuration fsConfig) throws URISyntaxException, IOException {
     if (!isContractTestEnabled()) {
       return null;
     }
 
-    String fileSystem = conf.get(FILE_SYSTEM_KEY);
+    String fileSystem = fsConfig.get(FILE_SYSTEM_KEY);
     if (fileSystem == null || fileSystem.trim().length() == 0) {
       throw new IOException("Default file system not configured.");
     }
 
-    Class<?> clazz = conf.getClass(FILE_SYSTEM_IMPL_KEY,
+    Class<?> clazz = fsConfig.getClass(FILE_SYSTEM_IMPL_KEY,
         FILE_SYSTEM_IMPL_DEFAULT);
-    FileSystem fs = (FileSystem) ReflectionUtils.newInstance(clazz, conf);
-    fs.initialize(new URI(fileSystem), conf);
+    FileSystem fs = (FileSystem) ReflectionUtils.newInstance(clazz, fsConfig);
+    fs.initialize(new URI(fileSystem), fsConfig);
     return fs;
   }
 }

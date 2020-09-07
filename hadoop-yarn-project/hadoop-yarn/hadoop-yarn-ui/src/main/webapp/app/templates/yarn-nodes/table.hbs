@@ -15,10 +15,10 @@
   See the License for the specific language governing permissions and
   limitations under the License.
 --}}
-<div class="row">
-  <div class="col-md-12">
+<div class="row clearfix">
+  <div class="col-md-12 yarn-applications-container">
     {{#if model.nodes}}
-      {{em-table columns=columns rows=model.nodes}}
+      {{em-table columns=columns rows=model.nodes definition=tableDefinition}}
     {{else}}
       <h4 align="center">No nodes found on this cluster</h4>
     {{/if}}

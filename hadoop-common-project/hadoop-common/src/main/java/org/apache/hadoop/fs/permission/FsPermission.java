@@ -24,8 +24,6 @@ import java.io.InvalidObjectException;
 import java.io.ObjectInputValidation;
 import java.io.Serializable;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -33,6 +31,8 @@ import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableFactories;
 import org.apache.hadoop.io.WritableFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A class for file/directory permissions.
@@ -41,7 +41,7 @@ import org.apache.hadoop.io.WritableFactory;
 @InterfaceStability.Stable
 public class FsPermission implements Writable, Serializable,
     ObjectInputValidation {
-  private static final Log LOG = LogFactory.getLog(FsPermission.class);
+  private static final Logger LOG = LoggerFactory.getLogger(FsPermission.class);
   private static final long serialVersionUID = 0x2fe08564;
 
   static final WritableFactory FACTORY = new WritableFactory() {
@@ -91,6 +91,40 @@ public class FsPermission implements Writable, Serializable,
   public FsPermission(short mode) { fromShort(mode); }
 
   /**
+   * Construct by the given mode.
+   *
+   * octal mask is applied.
+   *
+   *<pre>
+   *              before mask     after mask    file type   sticky bit
+   *
+   *    octal     100644            644         file          no
+   *    decimal    33188            420
+   *
+   *    octal     101644           1644         file          yes
+   *    decimal    33700           1420
+   *
+   *    octal      40644            644         directory     no
+   *    decimal    16804            420
+   *
+   *    octal      41644           1644         directory     yes
+   *    decimal    17316           1420
+   *</pre>
+   *
+   * 100644 becomes 644 while 644 remains as 644
+   *
+   * @param mode Mode is supposed to come from the result of native stat() call.
+   *             It contains complete permission information: rwxrwxrwx, sticky
+   *             bit, whether it is a directory or a file, etc. Upon applying
+   *             mask, only permission and sticky bit info will be kept because
+   *             they are the only parts to be used for now.
+   * @see #FsPermission(short mode)
+   */
+  public FsPermission(int mode) {
+    this((short)(mode & 01777));
+  }
+
+  /**
    * Copy constructor
    * 
    * @param other other permission
@@ -133,11 +167,13 @@ public class FsPermission implements Writable, Serializable,
   }
 
   @Override
+  @Deprecated
   public void write(DataOutput out) throws IOException {
     out.writeShort(toShort());
   }
 
   @Override
+  @Deprecated
   public void readFields(DataInput in) throws IOException {
     fromShort(in.readShort());
   }
@@ -161,7 +197,7 @@ public class FsPermission implements Writable, Serializable,
    */
   public static FsPermission read(DataInput in) throws IOException {
     FsPermission p = new FsPermission();
-    p.readFields(in);
+    p.fromShort(in.readShort());
     return p;
   }
 
@@ -184,6 +220,7 @@ public class FsPermission implements Writable, Serializable,
    *
    * @return short extended short representation of this permission
    */
+  @Deprecated
   public short toExtendedShort() {
     return toShort();
   }
@@ -299,7 +336,10 @@ public class FsPermission implements Writable, Serializable,
    * Returns true if there is also an ACL (access control list).
    *
    * @return boolean true if there is also an ACL (access control list).
+   * @deprecated Get acl bit from the {@link org.apache.hadoop.fs.FileStatus}
+   * object.
    */
+  @Deprecated
   public boolean getAclBit() {
     // File system subclasses that support the ACL bit would override this.
     return false;
@@ -307,8 +347,21 @@ public class FsPermission implements Writable, Serializable,
 
   /**
    * Returns true if the file is encrypted or directory is in an encryption zone
+   * @deprecated Get encryption bit from the
+   * {@link org.apache.hadoop.fs.FileStatus} object.
    */
+  @Deprecated
   public boolean getEncryptedBit() {
+    return false;
+  }
+
+  /**
+   * Returns true if the file or directory is erasure coded.
+   * @deprecated Get ec bit from the {@link org.apache.hadoop.fs.FileStatus}
+   * object.
+   */
+  @Deprecated
+  public boolean getErasureCodedBit() {
     return false;
   }
 

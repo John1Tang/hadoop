@@ -18,9 +18,11 @@
 
 package org.apache.hadoop.hdfs.server.namenode;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotManager;
 import org.junit.Test;
 import org.mockito.Mockito;
 
@@ -32,14 +34,20 @@ import static org.mockito.Mockito.when;
  * Test {@link FSDirAttrOp}.
  */
 public class TestFSDirAttrOp {
-  public static final Log LOG = LogFactory.getLog(TestFSDirAttrOp.class);
+  public static final Logger LOG =
+      LoggerFactory.getLogger(TestFSDirAttrOp.class);
 
   private boolean unprotectedSetTimes(long atime, long atime0, long precision,
       long mtime, boolean force) throws QuotaExceededException {
+    FSNamesystem fsn = Mockito.mock(FSNamesystem.class);
+    SnapshotManager ssMgr = Mockito.mock(SnapshotManager.class);
     FSDirectory fsd = Mockito.mock(FSDirectory.class);
     INodesInPath iip = Mockito.mock(INodesInPath.class);
     INode inode = Mockito.mock(INode.class);
 
+    when(fsd.getFSNamesystem()).thenReturn(fsn);
+    when(fsn.getSnapshotManager()).thenReturn(ssMgr);
+    when(ssMgr.getSkipCaptureAccessTimeOnlyChange()).thenReturn(false);
     when(fsd.getAccessTimePrecision()).thenReturn(precision);
     when(fsd.hasWriteLock()).thenReturn(Boolean.TRUE);
     when(iip.getLastINode()).thenReturn(inode);

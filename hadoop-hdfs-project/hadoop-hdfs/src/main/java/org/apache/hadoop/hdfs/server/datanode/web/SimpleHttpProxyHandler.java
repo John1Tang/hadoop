@@ -34,7 +34,7 @@ import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpRequestEncoder;
 import io.netty.handler.codec.http.HttpResponseEncoder;
-import org.apache.commons.logging.Log;
+import org.slf4j.Logger;
 
 import java.net.InetSocketAddress;
 
@@ -53,7 +53,7 @@ class SimpleHttpProxyHandler extends SimpleChannelInboundHandler<HttpRequest> {
   private String uri;
   private Channel proxiedChannel;
   private final InetSocketAddress host;
-  static final Log LOG = DatanodeHttpServer.LOG;
+  static final Logger LOG = DatanodeHttpServer.LOG;
 
   SimpleHttpProxyHandler(InetSocketAddress host) {
     this.host = host;
@@ -144,7 +144,9 @@ class SimpleHttpProxyHandler extends SimpleChannelInboundHandler<HttpRequest> {
 
   @Override
   public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-    LOG.info("Proxy for " + uri + " failed. cause: ", cause);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Proxy for " + uri + " failed. cause: ", cause);
+    }
     if (proxiedChannel != null) {
       proxiedChannel.close();
       proxiedChannel = null;

@@ -19,7 +19,6 @@
 package org.apache.hadoop.fs;
 
 import static org.junit.Assert.*;
-import static org.mockito.Matchers.*;
 import static org.mockito.Mockito.*;
 
 import java.io.IOException;
@@ -36,6 +35,7 @@ import org.apache.hadoop.fs.Options.CreateOpts;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.security.token.DelegationTokenIssuer;
 import org.apache.hadoop.util.Progressable;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -77,8 +77,8 @@ public class TestFilterFileSystem {
         boolean overwrite, int bufferSize, short replication, long blockSize,
         Progressable progress) throws IOException;
 
-    public boolean mkdirs(Path f);
     public FSDataInputStream open(Path f);
+    public FSDataInputStream open(PathHandle f);
     public FSDataOutputStream create(Path f);
     public FSDataOutputStream create(Path f, boolean overwrite);
     public FSDataOutputStream create(Path f, Progressable progress);
@@ -124,6 +124,8 @@ public class TestFilterFileSystem {
     public int getDefaultPort();
     public String getCanonicalServiceName();
     public Token<?> getDelegationToken(String renewer) throws IOException;
+    public DelegationTokenIssuer[] getAdditionalTokenIssuers()
+        throws IOException;
     public boolean deleteOnExit(Path f) throws IOException;
     public boolean cancelDeleteOnExit(Path f) throws IOException;
     public Token<?>[] addDelegationTokens(String renewer, Credentials creds)
@@ -132,7 +134,15 @@ public class TestFilterFileSystem {
     public Path fixRelativePart(Path p);
     public ContentSummary getContentSummary(Path f);
     public QuotaUsage getQuotaUsage(Path f);
+    void setQuota(Path f, long namespaceQuota, long storagespaceQuota);
+    void setQuotaByStorageType(Path f, StorageType type, long quota);
     StorageStatistics getStorageStatistics();
+
+    /*
+    Not passed through as the inner implementation will miss features
+    of the filter such as checksums.
+     */
+    MultipartUploaderBuilder createMultipartUploader(Path basePath);
   }
 
   @Test
@@ -272,6 +282,23 @@ public class TestFilterFileSystem {
     Rename opt = Rename.TO_TRASH;
     fs.rename(src, dst, opt);
     verify(mockFs).rename(eq(src), eq(dst), eq(opt));
+  }
+
+  /**
+   * Verify that filterFS always returns false, even if local/rawlocal
+   * ever implement multipart uploads.
+   */
+  @Test
+  public void testFilterPathCapabilites() throws Exception {
+    try (FilterFileSystem flfs = new FilterLocalFileSystem()) {
+      flfs.initialize(URI.create("filter:/"), conf);
+      Path src = new Path("/src");
+      assertFalse(
+          "hasPathCapability(FS_MULTIPART_UPLOADER) should have failed for "
+              + flfs,
+          flfs.hasPathCapability(src,
+              CommonPathCapabilities.FS_MULTIPART_UPLOADER));
+    }
   }
 
   private void checkInit(FilterFileSystem fs, boolean expectInit)

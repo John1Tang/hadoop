@@ -20,7 +20,6 @@ package org.apache.hadoop.hdfs.server.namenode;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
@@ -33,15 +32,15 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.NumberReplicas;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.Whitebox;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
 import org.mockito.Mockito;
-import org.mockito.internal.util.reflection.Whitebox;
 
-import com.google.common.base.Supplier;
+import java.util.function.Supplier;
 
 import java.io.IOException;
 
@@ -62,11 +61,11 @@ public class TestAddStripedBlockInFBR {
   @Before
   public void setup() throws IOException {
     Configuration conf = new HdfsConfiguration();
-    conf.set(DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_ENABLED_KEY,
-        StripedFileTestUtil.getDefaultECPolicy().getName());
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(groupSize).build();
     cluster.waitActive();
     dfs = cluster.getFileSystem();
+    dfs.enableErasureCodingPolicy(
+        StripedFileTestUtil.getDefaultECPolicy().getName());
   }
 
   @After

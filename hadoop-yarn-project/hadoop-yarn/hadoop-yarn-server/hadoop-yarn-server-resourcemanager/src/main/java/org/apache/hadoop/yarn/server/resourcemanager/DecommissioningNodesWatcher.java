@@ -17,16 +17,18 @@
  */
 package org.apache.hadoop.yarn.server.resourcemanager;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
@@ -36,7 +38,6 @@ import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.api.records.NodeStatus;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEventType;
@@ -58,24 +59,14 @@ import org.apache.hadoop.yarn.util.MonotonicClock;
  * a DECOMMISSIONING node will be DECOMMISSIONED no later than
  * DECOMMISSIONING_TIMEOUT regardless of running containers or applications.
  *
- * To be efficient, DecommissioningNodesWatcher skip tracking application
- * containers on a particular node before the node is in DECOMMISSIONING state.
- * It only tracks containers once the node is in DECOMMISSIONING state.
  * DecommissioningNodesWatcher basically is no cost when no node is
- * DECOMMISSIONING. This sacrifices the possibility that the node once
- * host containers of an application that is still running
- * (the affected map tasks will be rescheduled).
+ * DECOMMISSIONING.
  */
 public class DecommissioningNodesWatcher {
-  private static final Log LOG =
-      LogFactory.getLog(DecommissioningNodesWatcher.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(DecommissioningNodesWatcher.class);
 
   private final RMContext rmContext;
-
-  // Default timeout value in mills.
-  // Negative value indicates no timeout. 0 means immediate.
-  private long defaultTimeoutMs =
-      1000L * YarnConfiguration.DEFAULT_RM_NODE_GRACEFUL_DECOMMISSION_TIMEOUT;
 
   // Once a RMNode is observed in DECOMMISSIONING state,
   // All its ContainerStatus update are tracked inside DecomNodeContext.
@@ -93,8 +84,8 @@ public class DecommissioningNodesWatcher {
     // number of running containers at the moment.
     private int numActiveContainers;
 
-    // All applications run on the node at or after decommissioningStartTime.
-    private Set<ApplicationId> appIds;
+    // All applications run on the node.
+    private List<ApplicationId> appIds;
 
     // First moment the node is observed in DECOMMISSIONED state.
     private long decommissionedTime;
@@ -105,16 +96,15 @@ public class DecommissioningNodesWatcher {
 
     private long lastUpdateTime;
 
-    public DecommissioningNodeContext(NodeId nodeId) {
+    public DecommissioningNodeContext(NodeId nodeId, int timeoutSec) {
       this.nodeId = nodeId;
-      this.appIds = new HashSet<ApplicationId>();
+      this.appIds = new ArrayList<>();
       this.decommissioningStartTime = mclock.getTime();
-      this.timeoutMs = defaultTimeoutMs;
+      this.timeoutMs = 1000L * timeoutSec;
     }
 
-    void updateTimeout(Integer timeoutSec) {
-      this.timeoutMs = (timeoutSec == null)?
-          defaultTimeoutMs : (1000L * timeoutSec);
+    void updateTimeout(int timeoutSec) {
+      this.timeoutMs = 1000L * timeoutSec;
     }
   }
 
@@ -132,7 +122,6 @@ public class DecommissioningNodesWatcher {
   }
 
   public void init(Configuration conf) {
-    readDecommissioningTimeout(conf);
     int v = conf.getInt(
         YarnConfiguration.RM_DECOMMISSIONING_NODES_WATCHER_POLL_INTERVAL,
         YarnConfiguration
@@ -162,7 +151,8 @@ public class DecommissioningNodesWatcher {
       }
     } else if (rmNode.getState() == NodeState.DECOMMISSIONING) {
       if (context == null) {
-        context = new DecommissioningNodeContext(rmNode.getNodeID());
+        context = new DecommissioningNodeContext(rmNode.getNodeID(),
+            rmNode.getDecommissioningTimeout());
         decomNodes.put(rmNode.getNodeID(), context);
         context.nodeState = rmNode.getState();
         context.decommissionedTime = 0;
@@ -170,9 +160,7 @@ public class DecommissioningNodesWatcher {
       context.updateTimeout(rmNode.getDecommissioningTimeout());
       context.lastUpdateTime = now;
 
-      if (remoteNodeStatus.getKeepAliveApplications() != null) {
-        context.appIds.addAll(remoteNodeStatus.getKeepAliveApplications());
-      }
+      context.appIds = rmNode.getRunningApps();
 
       // Count number of active containers.
       int numActiveContainers = 0;
@@ -182,14 +170,7 @@ public class DecommissioningNodesWatcher {
             newState == ContainerState.NEW) {
           numActiveContainers++;
         }
-        context.numActiveContainers = numActiveContainers;
-        ApplicationId aid = cs.getContainerId()
-            .getApplicationAttemptId().getApplicationId();
-        if (!context.appIds.contains(aid)) {
-          context.appIds.add(aid);
-        }
       }
-
       context.numActiveContainers = numActiveContainers;
 
       // maintain lastContainerFinishTime.
@@ -211,6 +192,11 @@ public class DecommissioningNodesWatcher {
       LOG.info("remove " + nodeId + " in " + context.nodeState);
       decomNodes.remove(nodeId);
     }
+  }
+
+  public void stop() {
+    pollTimer.cancel();
+    pollTimer = null;
   }
 
   /**
@@ -260,7 +246,6 @@ public class DecommissioningNodesWatcher {
           DecommissioningNodeStatus.TIMEOUT;
     }
 
-    removeCompletedApps(context);
     if (context.appIds.size() == 0) {
       return DecommissioningNodeStatus.READY;
     } else {
@@ -298,7 +283,7 @@ public class DecommissioningNodesWatcher {
         }
         // Remove stale non-DECOMMISSIONING node
         if (d.nodeState != NodeState.DECOMMISSIONING) {
-          LOG.debug("remove " + d.nodeState + " " + d.nodeId);
+          LOG.debug("remove {} {}", d.nodeState, d.nodeId);
           it.remove();
           continue;
         } else if (now - d.lastUpdateTime > 60000L) {
@@ -306,7 +291,7 @@ public class DecommissioningNodesWatcher {
           RMNode rmNode = getRmNode(d.nodeId);
           if (rmNode != null &&
               rmNode.getState() == NodeState.DECOMMISSIONED) {
-            LOG.debug("remove " + rmNode.getState() + " " + d.nodeId);
+            LOG.debug("remove {} {}", rmNode.getState(), d.nodeId);
             it.remove();
             continue;
           }
@@ -314,7 +299,7 @@ public class DecommissioningNodesWatcher {
         if (d.timeoutMs >= 0 &&
             d.decommissioningStartTime + d.timeoutMs < now) {
           staleNodes.add(d.nodeId);
-          LOG.debug("Identified stale and timeout node " + d.nodeId);
+          LOG.debug("Identified stale and timeout node {}", d.nodeId);
         }
       }
 
@@ -340,25 +325,6 @@ public class DecommissioningNodesWatcher {
       rmNode = this.rmContext.getInactiveRMNodes().get(nodeId);
     }
     return rmNode;
-  }
-
-  private void removeCompletedApps(DecommissioningNodeContext context) {
-    Iterator<ApplicationId> it = context.appIds.iterator();
-    while (it.hasNext()) {
-      ApplicationId appId = it.next();
-      RMApp rmApp = rmContext.getRMApps().get(appId);
-      if (rmApp == null) {
-        LOG.debug("Consider non-existing app " + appId + " as completed");
-        it.remove();
-        continue;
-      }
-      if (rmApp.getState() == RMAppState.FINISHED ||
-          rmApp.getState() == RMAppState.FAILED ||
-          rmApp.getState() == RMAppState.KILLED) {
-        LOG.debug("Remove " + rmApp.getState() + " app " + appId);
-        it.remove();
-      }
-    }
   }
 
   // Time in second to be decommissioned.
@@ -414,26 +380,6 @@ public class DecommissioningNodesWatcher {
         }
       }
       LOG.debug("Decommissioning node: " + sb.toString());
-    }
-  }
-
-  // Read possible new DECOMMISSIONING_TIMEOUT_KEY from yarn-site.xml.
-  // This enables DecommissioningNodesWatcher to pick up new value
-  // without ResourceManager restart.
-  private void readDecommissioningTimeout(Configuration conf) {
-    try {
-      if (conf == null) {
-        conf = new YarnConfiguration();
-      }
-      int v = conf.getInt(
-          YarnConfiguration.RM_NODE_GRACEFUL_DECOMMISSION_TIMEOUT,
-          YarnConfiguration.DEFAULT_RM_NODE_GRACEFUL_DECOMMISSION_TIMEOUT);
-      if (defaultTimeoutMs != 1000L * v) {
-        defaultTimeoutMs = 1000L * v;
-        LOG.info("Use new decommissioningTimeoutMs: " + defaultTimeoutMs);
-      }
-    } catch (Exception e) {
-      LOG.info("Error readDecommissioningTimeout ", e);
     }
   }
 }

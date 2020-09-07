@@ -17,8 +17,8 @@
  */
 package org.apache.hadoop.hdfs;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -34,8 +34,8 @@ import java.io.IOException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class TestWriteStripedFileWithFailure {
-  public static final Log LOG = LogFactory
-      .getLog(TestWriteStripedFileWithFailure.class);
+  public static final Logger LOG = LoggerFactory
+      .getLogger(TestWriteStripedFileWithFailure.class);
   private MiniDFSCluster cluster;
   private FileSystem fs;
   private Configuration conf = new HdfsConfiguration();
@@ -160,7 +160,8 @@ public class TestWriteStripedFileWithFailure {
         blockSize * dataBlocks);
     StripedFileTestUtil.verifyStatefulRead(fs, srcPath, fileLength, expected,
         smallBuf);
-    StripedFileTestUtil.verifyPread(fs, srcPath, fileLength, expected, largeBuf);
+    StripedFileTestUtil.verifyPread((DistributedFileSystem)fs, srcPath,
+        fileLength, expected, largeBuf);
 
     // delete the file
     fs.delete(srcPath, true);

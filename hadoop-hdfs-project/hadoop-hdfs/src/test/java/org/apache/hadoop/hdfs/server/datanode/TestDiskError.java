@@ -28,7 +28,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.base.Supplier;
+import java.util.function.Supplier;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -167,7 +167,8 @@ public class TestDiskError {
         BlockTokenSecretManager.DUMMY_TOKEN, "",
         new DatanodeInfo[0], new StorageType[0], null,
         BlockConstructionStage.PIPELINE_SETUP_CREATE, 1, 0L, 0L, 0L,
-        checksum, CachingStrategy.newDefaultStrategy(), false, false, null);
+        checksum, CachingStrategy.newDefaultStrategy(), false, false,
+        null, null, new String[0]);
     out.flush();
 
     // close the connection before sending the content of the block
@@ -239,10 +240,10 @@ public class TestDiskError {
   @Test
   public void testDataTransferWhenBytesPerChecksumIsZero() throws IOException {
     DataNode dn0 = cluster.getDataNodes().get(0);
-    // Make a mock blockScanner class and return false whenever isEnabled is
+    // Make a mock blockScanner class and return true whenever isEnabled is
     // called on blockScanner
     BlockScanner mockScanner = Mockito.mock(BlockScanner.class);
-    Mockito.when(mockScanner.isEnabled()).thenReturn(false);
+    Mockito.when(mockScanner.isEnabled()).thenReturn(true);
     dn0.setBlockScanner(mockScanner);
     Path filePath = new Path("test.dat");
     FSDataOutputStream out = fs.create(filePath, (short) 1);
@@ -274,7 +275,7 @@ public class TestDiskError {
             dn1.getDatanodeId());
 
     dn0.transferBlock(block, new DatanodeInfo[]{dnd1},
-        new StorageType[]{StorageType.DISK});
+        new StorageType[]{StorageType.DISK}, new String[0]);
     // Sleep for 1 second so the DataTrasnfer daemon can start transfer.
     try {
       Thread.sleep(1000);

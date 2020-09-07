@@ -18,18 +18,28 @@
 
 package org.apache.hadoop.fs.s3a;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.fs.FileSystem.Statistics;
+import org.apache.hadoop.fs.s3a.s3guard.MetastoreInstrumentation;
+import org.apache.hadoop.metrics2.AbstractMetric;
 import org.apache.hadoop.metrics2.MetricStringBuilder;
-import org.apache.hadoop.metrics2.annotation.Metrics;
-import org.apache.hadoop.metrics2.lib.Interns;
+import org.apache.hadoop.metrics2.MetricsCollector;
+import org.apache.hadoop.metrics2.MetricsInfo;
+import org.apache.hadoop.metrics2.MetricsRecordBuilder;
+import org.apache.hadoop.metrics2.MetricsSource;
+import org.apache.hadoop.metrics2.MetricsSystem;
+import org.apache.hadoop.metrics2.MetricsTag;
+import org.apache.hadoop.metrics2.impl.MetricsSystemImpl;
 import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 import org.apache.hadoop.metrics2.lib.MutableCounterLong;
 import org.apache.hadoop.metrics2.lib.MutableGaugeLong;
 import org.apache.hadoop.metrics2.lib.MutableMetric;
+import org.apache.hadoop.metrics2.lib.MutableQuantiles;
 
 import java.io.Closeable;
 import java.net.URI;
@@ -38,7 +48,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import org.apache.hadoop.fs.FileSystem.Statistics;
 
 import static org.apache.hadoop.fs.s3a.Statistic.*;
 
@@ -52,16 +61,49 @@ import static org.apache.hadoop.fs.s3a.Statistic.*;
  * the operations to increment/query metric values are designed to handle
  * lookup failures.
  */
-@Metrics(about = "Metrics for S3a", context = "S3AFileSystem")
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
-public class S3AInstrumentation {
+public class S3AInstrumentation implements Closeable, MetricsSource {
   private static final Logger LOG = LoggerFactory.getLogger(
       S3AInstrumentation.class);
 
-  public static final String CONTEXT = "S3AFileSystem";
+  private static final String METRICS_SOURCE_BASENAME = "S3AMetrics";
+
+  /**
+   * {@value #METRICS_SYSTEM_NAME} The name of the s3a-specific metrics
+   * system instance used for s3a metrics.
+   */
+  public static final String METRICS_SYSTEM_NAME = "s3a-file-system";
+
+  /**
+   * {@value #CONTEXT} Currently all s3a metrics are placed in a single
+   * "context". Distinct contexts may be used in the future.
+   */
+  public static final String CONTEXT = "s3aFileSystem";
+
+  /**
+   * {@value #METRIC_TAG_FILESYSTEM_ID} The name of a field added to metrics
+   * records that uniquely identifies a specific FileSystem instance.
+   */
+  public static final String METRIC_TAG_FILESYSTEM_ID = "s3aFileSystemId";
+
+  /**
+   * {@value #METRIC_TAG_BUCKET} The name of a field added to metrics records
+   * that indicates the hostname portion of the FS URL.
+   */
+  public static final String METRIC_TAG_BUCKET = "bucket";
+
+  // metricsSystemLock must be used to synchronize modifications to
+  // metricsSystem and the following counters.
+  private static Object metricsSystemLock = new Object();
+  private static MetricsSystem metricsSystem = null;
+  private static int metricsSourceNameCounter = 0;
+  private static int metricsSourceActiveCounter = 0;
+
+  private String metricsSourceName;
+
   private final MetricsRegistry registry =
-      new MetricsRegistry("S3AFileSystem").setContext(CONTEXT);
+      new MetricsRegistry("s3aFileSystem").setContext(CONTEXT);
   private final MutableCounterLong streamOpenOperations;
   private final MutableCounterLong streamCloseOperations;
   private final MutableCounterLong streamClosed;
@@ -79,7 +121,9 @@ public class S3AInstrumentation {
   private final MutableCounterLong streamBytesReadInClose;
   private final MutableCounterLong streamBytesDiscardedInAbort;
   private final MutableCounterLong ignoredErrors;
-
+  private final MutableQuantiles putLatencyQuantile;
+  private final MutableQuantiles throttleRateQuantile;
+  private final MutableQuantiles s3GuardThrottleRateQuantile;
   private final MutableCounterLong numberOfFilesCreated;
   private final MutableCounterLong numberOfFilesCopied;
   private final MutableCounterLong bytesOfFilesCopied;
@@ -87,12 +131,19 @@ public class S3AInstrumentation {
   private final MutableCounterLong numberOfFakeDirectoryDeletes;
   private final MutableCounterLong numberOfDirectoriesCreated;
   private final MutableCounterLong numberOfDirectoriesDeleted;
-  private final Map<String, MutableCounterLong> streamMetrics =
-      new HashMap<>(30);
+
+  /** Instantiate this without caring whether or not S3Guard is enabled. */
+  private final S3GuardInstrumentation s3GuardInstrumentation
+      = new S3GuardInstrumentation();
 
   private static final Statistic[] COUNTERS_TO_CREATE = {
       INVOCATION_COPY_FROM_LOCAL_FILE,
+      INVOCATION_CREATE,
+      INVOCATION_CREATE_NON_RECURSIVE,
+      INVOCATION_DELETE,
       INVOCATION_EXISTS,
+      INVOCATION_GET_DELEGATION_TOKEN,
+      INVOCATION_GET_FILE_CHECKSUM,
       INVOCATION_GET_FILE_STATUS,
       INVOCATION_GLOB_STATUS,
       INVOCATION_IS_DIRECTORY,
@@ -101,6 +152,7 @@ public class S3AInstrumentation {
       INVOCATION_LIST_LOCATED_STATUS,
       INVOCATION_LIST_STATUS,
       INVOCATION_MKDIRS,
+      INVOCATION_OPEN,
       INVOCATION_RENAME,
       OBJECT_COPY_REQUESTS,
       OBJECT_DELETE_REQUESTS,
@@ -111,14 +163,45 @@ public class S3AInstrumentation {
       OBJECT_PUT_BYTES,
       OBJECT_PUT_REQUESTS,
       OBJECT_PUT_REQUESTS_COMPLETED,
+      OBJECT_SELECT_REQUESTS,
+      STREAM_READ_VERSION_MISMATCHES,
       STREAM_WRITE_FAILURES,
       STREAM_WRITE_BLOCK_UPLOADS,
       STREAM_WRITE_BLOCK_UPLOADS_COMMITTED,
       STREAM_WRITE_BLOCK_UPLOADS_ABORTED,
       STREAM_WRITE_TOTAL_TIME,
       STREAM_WRITE_TOTAL_DATA,
+      COMMITTER_COMMITS_CREATED,
+      COMMITTER_COMMITS_COMPLETED,
+      COMMITTER_JOBS_SUCCEEDED,
+      COMMITTER_JOBS_FAILED,
+      COMMITTER_TASKS_SUCCEEDED,
+      COMMITTER_TASKS_FAILED,
+      COMMITTER_BYTES_COMMITTED,
+      COMMITTER_BYTES_UPLOADED,
+      COMMITTER_COMMITS_FAILED,
+      COMMITTER_COMMITS_ABORTED,
+      COMMITTER_COMMITS_REVERTED,
+      COMMITTER_MAGIC_FILES_CREATED,
+      S3GUARD_METADATASTORE_PUT_PATH_REQUEST,
+      S3GUARD_METADATASTORE_INITIALIZATION,
+      S3GUARD_METADATASTORE_RECORD_DELETES,
+      S3GUARD_METADATASTORE_RECORD_READS,
+      S3GUARD_METADATASTORE_RECORD_WRITES,
+      S3GUARD_METADATASTORE_RETRY,
+      S3GUARD_METADATASTORE_THROTTLED,
+      S3GUARD_METADATASTORE_AUTHORITATIVE_DIRECTORIES_UPDATED,
+      STORE_IO_THROTTLED,
+      DELEGATION_TOKENS_ISSUED,
+      FILES_DELETE_REJECTED,
+      MULTIPART_INSTANTIATED,
+      MULTIPART_PART_PUT,
+      MULTIPART_PART_PUT_BYTES,
+      MULTIPART_UPLOAD_ABORTED,
+      MULTIPART_UPLOAD_ABORT_UNDER_PATH_INVOKED,
+      MULTIPART_UPLOAD_COMPLETED,
+      MULTIPART_UPLOAD_STARTED
   };
-
 
   private static final Statistic[] GAUGES_TO_CREATE = {
       OBJECT_PUT_REQUESTS_ACTIVE,
@@ -130,33 +213,31 @@ public class S3AInstrumentation {
 
   public S3AInstrumentation(URI name) {
     UUID fileSystemInstanceId = UUID.randomUUID();
-    registry.tag("FileSystemId",
-        "A unique identifier for the FS ",
-        fileSystemInstanceId.toString() + "-" + name.getHost());
-    registry.tag("fsURI",
-        "URI of this filesystem",
-        name.toString());
-    streamOpenOperations = streamCounter(STREAM_OPENED);
-    streamCloseOperations = streamCounter(STREAM_CLOSE_OPERATIONS);
-    streamClosed = streamCounter(STREAM_CLOSED);
-    streamAborted = streamCounter(STREAM_ABORTED);
-    streamSeekOperations = streamCounter(STREAM_SEEK_OPERATIONS);
-    streamReadExceptions = streamCounter(STREAM_READ_EXCEPTIONS);
+    registry.tag(METRIC_TAG_FILESYSTEM_ID,
+        "A unique identifier for the instance",
+        fileSystemInstanceId.toString());
+    registry.tag(METRIC_TAG_BUCKET, "Hostname from the FS URL", name.getHost());
+    streamOpenOperations = counter(STREAM_OPENED);
+    streamCloseOperations = counter(STREAM_CLOSE_OPERATIONS);
+    streamClosed = counter(STREAM_CLOSED);
+    streamAborted = counter(STREAM_ABORTED);
+    streamSeekOperations = counter(STREAM_SEEK_OPERATIONS);
+    streamReadExceptions = counter(STREAM_READ_EXCEPTIONS);
     streamForwardSeekOperations =
-        streamCounter(STREAM_FORWARD_SEEK_OPERATIONS);
+        counter(STREAM_FORWARD_SEEK_OPERATIONS);
     streamBackwardSeekOperations =
-        streamCounter(STREAM_BACKWARD_SEEK_OPERATIONS);
-    streamBytesSkippedOnSeek = streamCounter(STREAM_SEEK_BYTES_SKIPPED);
+        counter(STREAM_BACKWARD_SEEK_OPERATIONS);
+    streamBytesSkippedOnSeek = counter(STREAM_SEEK_BYTES_SKIPPED);
     streamBytesBackwardsOnSeek =
-        streamCounter(STREAM_SEEK_BYTES_BACKWARDS);
-    streamBytesRead = streamCounter(STREAM_SEEK_BYTES_READ);
-    streamReadOperations = streamCounter(STREAM_READ_OPERATIONS);
+        counter(STREAM_SEEK_BYTES_BACKWARDS);
+    streamBytesRead = counter(STREAM_SEEK_BYTES_READ);
+    streamReadOperations = counter(STREAM_READ_OPERATIONS);
     streamReadFullyOperations =
-        streamCounter(STREAM_READ_FULLY_OPERATIONS);
+        counter(STREAM_READ_FULLY_OPERATIONS);
     streamReadsIncomplete =
-        streamCounter(STREAM_READ_OPERATIONS_INCOMPLETE);
-    streamBytesReadInClose = streamCounter(STREAM_CLOSE_BYTES_READ);
-    streamBytesDiscardedInAbort = streamCounter(STREAM_ABORT_BYTES_DISCARDED);
+        counter(STREAM_READ_OPERATIONS_INCOMPLETE);
+    streamBytesReadInClose = counter(STREAM_CLOSE_BYTES_READ);
+    streamBytesDiscardedInAbort = counter(STREAM_ABORT_BYTES_DISCARDED);
     numberOfFilesCreated = counter(FILES_CREATED);
     numberOfFilesCopied = counter(FILES_COPIED);
     bytesOfFilesCopied = counter(FILES_COPIED_BYTES);
@@ -171,6 +252,44 @@ public class S3AInstrumentation {
     for (Statistic statistic : GAUGES_TO_CREATE) {
       gauge(statistic.getSymbol(), statistic.getDescription());
     }
+    //todo need a config for the quantiles interval?
+    int interval = 1;
+    putLatencyQuantile = quantiles(S3GUARD_METADATASTORE_PUT_PATH_LATENCY,
+        "ops", "latency", interval);
+    s3GuardThrottleRateQuantile = quantiles(S3GUARD_METADATASTORE_THROTTLE_RATE,
+        "events", "frequency (Hz)", interval);
+    throttleRateQuantile = quantiles(STORE_IO_THROTTLE_RATE,
+        "events", "frequency (Hz)", interval);
+
+    registerAsMetricsSource(name);
+  }
+
+  @VisibleForTesting
+  public MetricsSystem getMetricsSystem() {
+    synchronized (metricsSystemLock) {
+      if (metricsSystem == null) {
+        metricsSystem = new MetricsSystemImpl();
+        metricsSystem.init(METRICS_SYSTEM_NAME);
+      }
+    }
+    return metricsSystem;
+  }
+
+  /**
+   * Register this instance as a metrics source.
+   * @param name s3a:// URI for the associated FileSystem instance
+   */
+  private void registerAsMetricsSource(URI name) {
+    int number;
+    synchronized(metricsSystemLock) {
+      getMetricsSystem();
+
+      metricsSourceActiveCounter++;
+      number = ++metricsSourceNameCounter;
+    }
+    String msName = METRICS_SOURCE_BASENAME + number;
+    metricsSourceName = msName + "-" + name.getHost();
+    metricsSystem.register(metricsSourceName, "", this);
   }
 
   /**
@@ -184,36 +303,12 @@ public class S3AInstrumentation {
   }
 
   /**
-   * Create a counter in the stream map: these are unregistered in the public
-   * metrics.
-   * @param name counter name
-   * @param desc counter description
-   * @return a new counter
-   */
-  protected final MutableCounterLong streamCounter(String name, String desc) {
-    MutableCounterLong counter = new MutableCounterLong(
-        Interns.info(name, desc), 0L);
-    streamMetrics.put(name, counter);
-    return counter;
-  }
-
-  /**
    * Create a counter in the registry.
    * @param op statistic to count
    * @return a new counter
    */
   protected final MutableCounterLong counter(Statistic op) {
     return counter(op.getSymbol(), op.getDescription());
-  }
-
-  /**
-   * Create a counter in the stream map: these are unregistered in the public
-   * metrics.
-   * @param op statistic to count
-   * @return a new counter
-   */
-  protected final MutableCounterLong streamCounter(Statistic op) {
-    return streamCounter(op.getSymbol(), op.getDescription());
   }
 
   /**
@@ -224,6 +319,22 @@ public class S3AInstrumentation {
    */
   protected final MutableGaugeLong gauge(String name, String desc) {
     return registry.newGauge(name, desc, 0L);
+  }
+
+  /**
+   * Create a quantiles in the registry.
+   * @param op  statistic to collect
+   * @param sampleName sample name of the quantiles
+   * @param valueName value name of the quantiles
+   * @param interval interval of the quantiles in seconds
+   * @return the created quantiles metric
+   */
+  protected final MutableQuantiles quantiles(Statistic op,
+      String sampleName,
+      String valueName,
+      int interval) {
+    return registry.newQuantiles(op.getSymbol(), op.getDescription(),
+        sampleName, valueName, interval);
   }
 
   /**
@@ -250,11 +361,6 @@ public class S3AInstrumentation {
         prefix,
         separator, suffix);
     registry.snapshot(metricBuilder, all);
-    for (Map.Entry<String, MutableCounterLong> entry:
-        streamMetrics.entrySet()) {
-      metricBuilder.tuple(entry.getKey(),
-          Long.toString(entry.getValue().value()));
-    }
     return metricBuilder.toString();
   }
 
@@ -311,6 +417,20 @@ public class S3AInstrumentation {
   }
 
   /**
+   * Look up a quantiles.
+   * @param name quantiles name
+   * @return the quantiles or null
+   * @throws ClassCastException if the metric is not a Quantiles.
+   */
+  public MutableQuantiles lookupQuantiles(String name) {
+    MutableMetric metric = lookupMetric(name);
+    if (metric == null) {
+      LOG.debug("No quantiles {}", name);
+    }
+    return (MutableQuantiles) metric;
+  }
+
+  /**
    * Look up a metric from both the registered set and the lighter weight
    * stream entries.
    * @param name metric name
@@ -318,9 +438,6 @@ public class S3AInstrumentation {
    */
   public MutableMetric lookupMetric(String name) {
     MutableMetric metric = getRegistry().get(name);
-    if (metric == null) {
-      metric = streamMetrics.get(name);
-    }
     return metric;
   }
 
@@ -332,7 +449,7 @@ public class S3AInstrumentation {
   }
 
   /**
-   * Indicate that S3A deleted one or more file.s
+   * Indicate that S3A deleted one or more files.
    * @param count number of files.
    */
   public void fileDeleted(int count) {
@@ -391,6 +508,21 @@ public class S3AInstrumentation {
       counter.incr(count);
     }
   }
+
+  /**
+   * Add a value to a quantiles statistic. No-op if the quantile
+   * isn't found.
+   * @param op operation to look up.
+   * @param value value to add.
+   * @throws ClassCastException if the metric is not a Quantiles.
+   */
+  public void addValueToQuantiles(Statistic op, long value) {
+    MutableQuantiles quantiles = lookupQuantiles(op.getSymbol());
+    if (quantiles != null) {
+      quantiles.add(value);
+    }
+  }
+
   /**
    * Increment a specific counter.
    * No-op if not defined.
@@ -437,8 +569,25 @@ public class S3AInstrumentation {
    * Create a stream input statistics instance.
    * @return the new instance
    */
-  InputStreamStatistics newInputStreamStatistics() {
+  public InputStreamStatistics newInputStreamStatistics() {
     return new InputStreamStatistics();
+  }
+
+  /**
+   * Create a MetastoreInstrumentation instrumentation instance.
+   * There's likely to be at most one instance of this per FS instance.
+   * @return the S3Guard instrumentation point.
+   */
+  public MetastoreInstrumentation getS3GuardInstrumentation() {
+    return s3GuardInstrumentation;
+  }
+
+  /**
+   * Create a new instance of the committer statistics.
+   * @return a new committer statistics instance
+   */
+  CommitterStatistics newCommitterStatistics() {
+    return new CommitterStatistics();
   }
 
   /**
@@ -463,6 +612,31 @@ public class S3AInstrumentation {
     streamReadsIncomplete.incr(statistics.readsIncomplete);
     streamBytesReadInClose.incr(statistics.bytesReadInClose);
     streamBytesDiscardedInAbort.incr(statistics.bytesDiscardedInAbort);
+    incrementCounter(STREAM_READ_VERSION_MISMATCHES,
+        statistics.versionMismatches.get());
+  }
+
+  @Override
+  public void getMetrics(MetricsCollector collector, boolean all) {
+    registry.snapshot(collector.addRecord(registry.info().name()), true);
+  }
+
+  public void close() {
+    synchronized (metricsSystemLock) {
+      // it is critical to close each quantile, as they start a scheduled
+      // task in a shared thread pool.
+      putLatencyQuantile.stop();
+      throttleRateQuantile.stop();
+      s3GuardThrottleRateQuantile.stop();
+      metricsSystem.unregisterSource(metricsSourceName);
+      int activeSources = --metricsSourceActiveCounter;
+      if (activeSources == 0) {
+        LOG.debug("Shutting down metrics publisher");
+        metricsSystem.publishMetricsNow();
+        metricsSystem.shutdown();
+        metricsSystem = null;
+      }
+    }
   }
 
   /**
@@ -489,6 +663,11 @@ public class S3AInstrumentation {
     public long readsIncomplete;
     public long bytesReadInClose;
     public long bytesDiscardedInAbort;
+    public long policySetCount;
+    public long inputPolicy;
+    /** This is atomic so that it can be passed as a reference. */
+    private final AtomicLong versionMismatches = new AtomicLong(0);
+    private InputStreamStatistics mergedStats;
 
     private InputStreamStatistics() {
     }
@@ -520,9 +699,12 @@ public class S3AInstrumentation {
 
     /**
      * The inner stream was opened.
+     * @return the previous count
      */
-    public void streamOpened() {
+    public long streamOpened() {
+      long count = openOperations;
       openOperations++;
+      return count;
     }
 
     /**
@@ -598,7 +780,24 @@ public class S3AInstrumentation {
      */
     @Override
     public void close() {
-      mergeInputStreamStatistics(this);
+      merge(true);
+    }
+
+    /**
+     * The input policy has been switched.
+     * @param updatedPolicy enum value of new policy.
+     */
+    public void inputPolicySet(int updatedPolicy) {
+      policySetCount++;
+      inputPolicy = updatedPolicy;
+    }
+
+    /**
+     * Get a reference to the version mismatch counter.
+     * @return a counter which can be incremented.
+     */
+    public AtomicLong getVersionMismatchCounter() {
+      return versionMismatches;
     }
 
     /**
@@ -632,8 +831,93 @@ public class S3AInstrumentation {
       sb.append(", ReadsIncomplete=").append(readsIncomplete);
       sb.append(", BytesReadInClose=").append(bytesReadInClose);
       sb.append(", BytesDiscardedInAbort=").append(bytesDiscardedInAbort);
+      sb.append(", InputPolicy=").append(inputPolicy);
+      sb.append(", InputPolicySetCount=").append(policySetCount);
+      sb.append(", versionMismatches=").append(versionMismatches.get());
       sb.append('}');
       return sb.toString();
+    }
+
+    /**
+     * Merge the statistics into the filesystem's instrumentation instance.
+     * Takes a diff between the current version of the stats and the
+     * version of the stats when merge was last called, and merges the diff
+     * into the instrumentation instance. Used to periodically merge the
+     * stats into the fs-wide stats. <b>Behavior is undefined if called on a
+     * closed instance.</b>
+     */
+    void merge(boolean isClosed) {
+      if (mergedStats != null) {
+        mergeInputStreamStatistics(diff(mergedStats));
+      } else {
+        mergeInputStreamStatistics(this);
+      }
+      // If stats are closed, no need to create another copy
+      if (!isClosed) {
+        mergedStats = copy();
+      }
+    }
+
+    /**
+     * Returns a diff between this {@link InputStreamStatistics} instance and
+     * the given {@link InputStreamStatistics} instance.
+     */
+    private InputStreamStatistics diff(InputStreamStatistics inputStats) {
+      InputStreamStatistics diff = new InputStreamStatistics();
+      diff.openOperations = openOperations - inputStats.openOperations;
+      diff.closeOperations = closeOperations - inputStats.closeOperations;
+      diff.closed = closed - inputStats.closed;
+      diff.aborted = aborted - inputStats.aborted;
+      diff.seekOperations = seekOperations - inputStats.seekOperations;
+      diff.readExceptions = readExceptions - inputStats.readExceptions;
+      diff.forwardSeekOperations =
+              forwardSeekOperations - inputStats.forwardSeekOperations;
+      diff.backwardSeekOperations =
+              backwardSeekOperations - inputStats.backwardSeekOperations;
+      diff.bytesRead = bytesRead - inputStats.bytesRead;
+      diff.bytesSkippedOnSeek =
+              bytesSkippedOnSeek - inputStats.bytesSkippedOnSeek;
+      diff.bytesBackwardsOnSeek =
+              bytesBackwardsOnSeek - inputStats.bytesBackwardsOnSeek;
+      diff.readOperations = readOperations - inputStats.readOperations;
+      diff.readFullyOperations =
+              readFullyOperations - inputStats.readFullyOperations;
+      diff.readsIncomplete = readsIncomplete - inputStats.readsIncomplete;
+      diff.bytesReadInClose = bytesReadInClose - inputStats.bytesReadInClose;
+      diff.bytesDiscardedInAbort =
+              bytesDiscardedInAbort - inputStats.bytesDiscardedInAbort;
+      diff.policySetCount = policySetCount - inputStats.policySetCount;
+      diff.inputPolicy = inputPolicy - inputStats.inputPolicy;
+      diff.versionMismatches.set(versionMismatches.longValue() -
+              inputStats.versionMismatches.longValue());
+      return diff;
+    }
+
+    /**
+     * Returns a new {@link InputStreamStatistics} instance with all the same
+     * values as this {@link InputStreamStatistics}.
+     */
+    private InputStreamStatistics copy() {
+      InputStreamStatistics copy = new InputStreamStatistics();
+      copy.openOperations = openOperations;
+      copy.closeOperations = closeOperations;
+      copy.closed = closed;
+      copy.aborted = aborted;
+      copy.seekOperations = seekOperations;
+      copy.readExceptions = readExceptions;
+      copy.forwardSeekOperations = forwardSeekOperations;
+      copy.backwardSeekOperations = backwardSeekOperations;
+      copy.bytesRead = bytesRead;
+      copy.bytesSkippedOnSeek = bytesSkippedOnSeek;
+      copy.bytesBackwardsOnSeek = bytesBackwardsOnSeek;
+      copy.readOperations = readOperations;
+      copy.readFullyOperations = readFullyOperations;
+      copy.readsIncomplete = readsIncomplete;
+      copy.bytesReadInClose = bytesReadInClose;
+      copy.bytesDiscardedInAbort = bytesDiscardedInAbort;
+      copy.policySetCount = policySetCount;
+      copy.inputPolicy = inputPolicy;
+      return copy;
     }
   }
 
@@ -746,10 +1030,13 @@ public class S3AInstrumentation {
     }
 
     /**
-     * Note an exception in a multipart complete.
+     * Note exception in a multipart complete.
+     * @param count count of exceptions
      */
-    void exceptionInMultipartComplete() {
-      exceptionsInMultipartFinalize.incrementAndGet();
+    void exceptionInMultipartComplete(int count) {
+      if (count > 0) {
+        exceptionsInMultipartFinalize.addAndGet(count);
+      }
     }
 
     /**
@@ -765,6 +1052,15 @@ public class S3AInstrumentation {
      */
     public long getBytesPendingUpload() {
       return bytesPendingUpload.get();
+    }
+
+    /**
+     * Data has been uploaded to be committed in a subsequent operation;
+     * to be called at the end of the write.
+     * @param size size in bytes
+     */
+    public void commitUploaded(long size) {
+      incrementCounter(COMMITTER_BYTES_UPLOADED, size);
     }
 
     /**
@@ -838,6 +1134,243 @@ public class S3AInstrumentation {
           .append(" bytes/s");
       sb.append('}');
       return sb.toString();
+    }
+  }
+
+  /**
+   * Instrumentation exported to S3Guard.
+   */
+  private final class S3GuardInstrumentation
+      implements MetastoreInstrumentation {
+
+    @Override
+    public void initialized() {
+      incrementCounter(S3GUARD_METADATASTORE_INITIALIZATION, 1);
+    }
+
+    @Override
+    public void storeClosed() {
+
+    }
+
+    @Override
+    public void throttled() {
+      // counters are incremented by owner.
+    }
+
+    @Override
+    public void retrying() {
+      // counters are incremented by owner.
+    }
+
+    @Override
+    public void recordsDeleted(int count) {
+      incrementCounter(S3GUARD_METADATASTORE_RECORD_DELETES, count);
+    }
+
+    @Override
+    public void recordsRead(int count) {
+      incrementCounter(S3GUARD_METADATASTORE_RECORD_READS, count);
+    }
+
+    /**
+     * records have been written (including deleted).
+     * @param count number of records written.
+     */
+    @Override
+    public void recordsWritten(int count) {
+      incrementCounter(S3GUARD_METADATASTORE_RECORD_WRITES, count);
+    }
+
+    @Override
+    public void directoryMarkedAuthoritative() {
+      incrementCounter(S3GUARD_METADATASTORE_AUTHORITATIVE_DIRECTORIES_UPDATED,
+          1);
+    }
+
+    @Override
+    public void entryAdded(final long durationNanos) {
+      addValueToQuantiles(
+          S3GUARD_METADATASTORE_PUT_PATH_LATENCY,
+          durationNanos);
+      incrementCounter(S3GUARD_METADATASTORE_PUT_PATH_REQUEST, 1);
+    }
+
+  }
+
+  /**
+   * Instrumentation exported to S3Guard Committers.
+   */
+  @InterfaceAudience.Private
+  @InterfaceStability.Unstable
+  public final class CommitterStatistics {
+
+    /** A commit has been created. */
+    public void commitCreated() {
+      incrementCounter(COMMITTER_COMMITS_CREATED, 1);
+    }
+
+    /**
+     * Data has been uploaded to be committed in a subsequent operation.
+     * @param size size in bytes
+     */
+    public void commitUploaded(long size) {
+      incrementCounter(COMMITTER_BYTES_UPLOADED, size);
+    }
+
+    /**
+     * A commit has been completed.
+     * @param size size in bytes
+     */
+    public void commitCompleted(long size) {
+      incrementCounter(COMMITTER_COMMITS_COMPLETED, 1);
+      incrementCounter(COMMITTER_BYTES_COMMITTED, size);
+    }
+
+    /** A commit has been aborted. */
+    public void commitAborted() {
+      incrementCounter(COMMITTER_COMMITS_ABORTED, 1);
+    }
+
+    public void commitReverted() {
+      incrementCounter(COMMITTER_COMMITS_REVERTED, 1);
+    }
+
+    public void commitFailed() {
+      incrementCounter(COMMITTER_COMMITS_FAILED, 1);
+    }
+
+    public void taskCompleted(boolean success) {
+      incrementCounter(
+          success ? COMMITTER_TASKS_SUCCEEDED
+              : COMMITTER_TASKS_FAILED,
+          1);
+    }
+
+    public void jobCompleted(boolean success) {
+      incrementCounter(
+          success ? COMMITTER_JOBS_SUCCEEDED
+              : COMMITTER_JOBS_FAILED,
+          1);
+    }
+  }
+
+  /**
+   * Create a delegation token statistics instance.
+   * @return an instance of delegation token statistics
+   */
+  public DelegationTokenStatistics newDelegationTokenStatistics() {
+    return new DelegationTokenStatistics();
+  }
+
+  /**
+   * Instrumentation exported to S3A Delegation Token support.
+   */
+  @InterfaceAudience.Private
+  @InterfaceStability.Unstable
+  public final class DelegationTokenStatistics {
+
+    private DelegationTokenStatistics() {
+    }
+
+    /** A token has been issued. */
+    public void tokenIssued() {
+      incrementCounter(DELEGATION_TOKENS_ISSUED, 1);
+    }
+  }
+
+    /**
+   * Copy all the metrics to a map of (name, long-value).
+   * @return a map of the metrics
+   */
+  public Map<String, Long> toMap() {
+    MetricsToMap metricBuilder = new MetricsToMap(null);
+    registry.snapshot(metricBuilder, true);
+    return metricBuilder.getMap();
+  }
+
+  /**
+   * Convert all metrics to a map.
+   */
+  private static class MetricsToMap extends MetricsRecordBuilder {
+    private final MetricsCollector parent;
+    private final Map<String, Long> map =
+        new HashMap<>(COUNTERS_TO_CREATE.length * 2);
+
+    MetricsToMap(MetricsCollector parent) {
+      this.parent = parent;
+    }
+
+    @Override
+    public MetricsRecordBuilder tag(MetricsInfo info, String value) {
+      return this;
+    }
+
+    @Override
+    public MetricsRecordBuilder add(MetricsTag tag) {
+      return this;
+    }
+
+    @Override
+    public MetricsRecordBuilder add(AbstractMetric metric) {
+      return this;
+    }
+
+    @Override
+    public MetricsRecordBuilder setContext(String value) {
+      return this;
+    }
+
+    @Override
+    public MetricsRecordBuilder addCounter(MetricsInfo info, int value) {
+      return tuple(info, value);
+    }
+
+    @Override
+    public MetricsRecordBuilder addCounter(MetricsInfo info, long value) {
+      return tuple(info, value);
+    }
+
+    @Override
+    public MetricsRecordBuilder addGauge(MetricsInfo info, int value) {
+      return tuple(info, value);
+    }
+
+    @Override
+    public MetricsRecordBuilder addGauge(MetricsInfo info, long value) {
+      return tuple(info, value);
+    }
+
+    public MetricsToMap tuple(MetricsInfo info, long value) {
+      return tuple(info.name(), value);
+    }
+
+    public MetricsToMap tuple(String name, long value) {
+      map.put(name, value);
+      return this;
+    }
+
+    @Override
+    public MetricsRecordBuilder addGauge(MetricsInfo info, float value) {
+      return tuple(info, (long) value);
+    }
+
+    @Override
+    public MetricsRecordBuilder addGauge(MetricsInfo info, double value) {
+      return tuple(info, (long) value);
+    }
+
+    @Override
+    public MetricsCollector parent() {
+      return parent;
+    }
+
+    /**
+     * Get the map.
+     * @return the map of metrics
+     */
+    public Map<String, Long> getMap() {
+      return map;
     }
   }
 }

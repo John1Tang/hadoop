@@ -26,12 +26,12 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.commons.net.util.SubnetUtils;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.net.InetAddresses;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Container class which holds a list of ip/host addresses and 
@@ -43,7 +43,7 @@ import com.google.common.net.InetAddresses;
 
 public class MachineList {
   
-  public static final Log LOG = LogFactory.getLog(MachineList.class);
+  public static final Logger LOG = LoggerFactory.getLogger(MachineList.class);
   public static final String WILDCARD_VALUE = "*";
 
   /**
@@ -187,7 +187,7 @@ public class MachineList {
   }
 
   /**
-   * returns the contents of the MachineList as a Collection<String>
+   * returns the contents of the MachineList as a Collection&lt;String&gt;
    * This can be used for testing 
    * @return contents of the MachineList
    */

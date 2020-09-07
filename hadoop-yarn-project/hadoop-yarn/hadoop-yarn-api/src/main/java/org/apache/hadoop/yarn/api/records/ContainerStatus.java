@@ -201,4 +201,44 @@ public abstract class ContainerStatus {
     throw new UnsupportedOperationException(
         "subclass must implement this method");
   }
+
+  /**
+   * Add Extra state information of the container (SCHEDULED, LOCALIZING etc.).
+   * @param subState Extra State Information.
+   */
+  @Private
+  @Unstable
+  public void setContainerSubState(ContainerSubState subState) {
+    throw new UnsupportedOperationException(
+        "subclass must implement this method");
+  }
+
+  /**
+   * Get Extra state information of the container (SCHEDULED, LOCALIZING etc.).
+   * @return Extra State information.
+   */
+  @Private
+  @Unstable
+  public ContainerSubState getContainerSubState() {
+    throw new UnsupportedOperationException(
+        "subclass must implement this method");
+  }
+
+  /**
+   * Get exposed ports of the container.
+   * @return List of exposed ports
+   */
+  @Public
+  @Unstable
+  public String getExposedPorts() {
+    throw new UnsupportedOperationException(
+        "subclass must implement this method");
+  }
+
+  @Private
+  @Unstable
+  public void setExposedPorts(String ports) {
+    throw new UnsupportedOperationException(
+        "subclass must implement this method");
+  }
 }

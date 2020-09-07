@@ -18,14 +18,18 @@
 package org.apache.hadoop.hdfs.tools;
 
 import java.io.IOException;
+import java.net.URISyntaxException;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
-import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.StoragePolicySatisfierMode;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
 import org.junit.After;
 import org.junit.Before;
@@ -38,14 +42,19 @@ public class TestStoragePolicyCommands {
   private static final short REPL = 1;
   private static final int SIZE = 128;
 
-  private static Configuration conf;
-  private static MiniDFSCluster cluster;
-  private static DistributedFileSystem fs;
+  protected static Configuration conf;
+  protected static MiniDFSCluster cluster;
+  protected static FileSystem fs;
 
   @Before
-  public void clusterSetUp() throws IOException {
+  public void clusterSetUp() throws IOException, URISyntaxException {
     conf = new HdfsConfiguration();
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(REPL).build();
+    conf.set(DFSConfigKeys.DFS_STORAGE_POLICY_SATISFIER_MODE_KEY,
+        StoragePolicySatisfierMode.EXTERNAL.toString());
+    StorageType[][] newtypes = new StorageType[][] {
+        {StorageType.ARCHIVE, StorageType.DISK}};
+    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(REPL)
+        .storageTypes(newtypes).build();
     cluster.waitActive();
     fs = cluster.getFileSystem();
   }

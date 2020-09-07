@@ -20,28 +20,26 @@ package org.apache.hadoop.hdfs.qjournal.server;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
-import com.google.protobuf.ServiceException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 
+import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.protocolPB.PBHelper;
-import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos;
-import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos
-  .JournalIdProto;
-import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos
-  .GetEditLogManifestRequestProto;
-import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos
-  .GetEditLogManifestResponseProto;
-import org.apache.hadoop.hdfs.qjournal.protocolPB.QJournalProtocolPB;
+import org.apache.hadoop.hdfs.qjournal.protocol.InterQJournalProtocol;
+import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.GetEditLogManifestResponseProto;
+import org.apache.hadoop.hdfs.qjournal.protocolPB.InterQJournalProtocolPB;
+import org.apache.hadoop.hdfs.qjournal.protocolPB.InterQJournalProtocolTranslatorPB;
 import org.apache.hadoop.hdfs.server.common.Util;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLog;
 import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+import org.apache.hadoop.ipc.ProtobufRpcEngine2;
 import org.apache.hadoop.ipc.RPC;
+import org.apache.hadoop.security.SecurityUtil;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Daemon;
-import org.apache.hadoop.util.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,6 +50,9 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.security.PrivilegedExceptionAction;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 
 /**
@@ -66,7 +67,7 @@ public class JournalNodeSyncer {
   private final JournalNode jn;
   private final Journal journal;
   private final String jid;
-  private final JournalIdProto jidProto;
+  private  String nameServiceId;
   private final JNStorage jnStorage;
   private final Configuration conf;
   private volatile Daemon syncJournalDaemon;
@@ -78,13 +79,15 @@ public class JournalNodeSyncer {
   private final long journalSyncInterval;
   private final int logSegmentTransferTimeout;
   private final DataTransferThrottler throttler;
+  private final JournalMetrics metrics;
+  private boolean journalSyncerStarted;
 
   JournalNodeSyncer(JournalNode jouranlNode, Journal journal, String jid,
-      Configuration conf) {
+      Configuration conf, String nameServiceId) {
     this.jn = jouranlNode;
     this.journal = journal;
     this.jid = jid;
-    this.jidProto = convertJournalId(this.jid);
+    this.nameServiceId = nameServiceId;
     this.jnStorage = journal.getStorage();
     this.conf = conf;
     journalSyncInterval = conf.getLong(
@@ -94,22 +97,46 @@ public class JournalNodeSyncer {
         DFSConfigKeys.DFS_EDIT_LOG_TRANSFER_TIMEOUT_KEY,
         DFSConfigKeys.DFS_EDIT_LOG_TRANSFER_TIMEOUT_DEFAULT);
     throttler = getThrottler(conf);
+    metrics = journal.getMetrics();
+    journalSyncerStarted = false;
   }
 
   void stopSync() {
     shouldSync = false;
+    // Delete the edits.sync directory
+    File editsSyncDir = journal.getStorage().getEditsSyncDir();
+    if (editsSyncDir.exists()) {
+      FileUtil.fullyDelete(editsSyncDir);
+    }
     if (syncJournalDaemon != null) {
       syncJournalDaemon.interrupt();
     }
   }
 
-  public void start() {
-    LOG.info("Starting SyncJournal daemon for journal " + jid);
-    if (getOtherJournalNodeProxies()) {
-      startSyncJournalsDaemon();
-    } else {
-      LOG.warn("Failed to start SyncJournal daemon for journal " + jid);
+  public void start(String nsId) {
+    if (nsId != null) {
+      this.nameServiceId = nsId;
+      journal.setTriedJournalSyncerStartedwithnsId(true);
     }
+    if (!journalSyncerStarted && getOtherJournalNodeProxies()) {
+      LOG.info("Starting SyncJournal daemon for journal " + jid);
+      startSyncJournalsDaemon();
+      journalSyncerStarted = true;
+    }
+
+  }
+
+  public boolean isJournalSyncerStarted() {
+    return journalSyncerStarted;
+  }
+
+  private boolean createEditsSyncDir() {
+    File editsSyncDir = journal.getStorage().getEditsSyncDir();
+    if (editsSyncDir.exists()) {
+      LOG.info(editsSyncDir + " directory already exists.");
+      return true;
+    }
+    return editsSyncDir.mkdir();
   }
 
   private boolean getOtherJournalNodeProxies() {
@@ -135,35 +162,61 @@ public class JournalNodeSyncer {
   }
 
   private void startSyncJournalsDaemon() {
-    syncJournalDaemon = new Daemon(new Runnable() {
-      @Override
-      public void run() {
-        while(shouldSync) {
-          try {
-            if (!journal.isFormatted()) {
-              LOG.warn("Journal not formatted. Cannot sync.");
-            } else {
-              syncJournals();
-            }
-            Thread.sleep(journalSyncInterval);
-          } catch (Throwable t) {
-            if (!shouldSync) {
-              if (t instanceof InterruptedException) {
-                LOG.info("Stopping JournalNode Sync.");
-              } else {
-                LOG.warn("JournalNodeSyncer received an exception while " +
-                    "shutting down.", t);
-              }
-              break;
-            } else {
-              if (t instanceof InterruptedException) {
-                LOG.warn("JournalNodeSyncer interrupted", t);
-                break;
-              }
-            }
-            LOG.error(
-                "JournalNodeSyncer daemon received Runtime exception. ", t);
+    syncJournalDaemon = new Daemon(() -> {
+      // Wait for journal to be formatted to create edits.sync directory
+      while(!journal.isFormatted()) {
+        try {
+          Thread.sleep(journalSyncInterval);
+        } catch (InterruptedException e) {
+          LOG.error("JournalNodeSyncer daemon received Runtime exception.", e);
+          Thread.currentThread().interrupt();
+          return;
+        }
+      }
+      if (!createEditsSyncDir()) {
+        LOG.error("Failed to create directory for downloading log " +
+                "segments: %s. Stopping Journal Node Sync.",
+            journal.getStorage().getEditsSyncDir());
+        return;
+      }
+      while(shouldSync) {
+        try {
+          if (!journal.isFormatted()) {
+            LOG.warn("Journal cannot sync. Not formatted.");
+          } else {
+            syncJournals();
           }
+        } catch (Throwable t) {
+          if (!shouldSync) {
+            if (t instanceof InterruptedException) {
+              LOG.info("Stopping JournalNode Sync.");
+              Thread.currentThread().interrupt();
+              return;
+            } else {
+              LOG.warn("JournalNodeSyncer received an exception while " +
+                  "shutting down.", t);
+            }
+            break;
+          } else {
+            if (t instanceof InterruptedException) {
+              LOG.warn("JournalNodeSyncer interrupted", t);
+              Thread.currentThread().interrupt();
+              return;
+            }
+          }
+          LOG.error(
+              "JournalNodeSyncer daemon received Runtime exception. ", t);
+        }
+        try {
+          Thread.sleep(journalSyncInterval);
+        } catch (InterruptedException e) {
+          if (!shouldSync) {
+            LOG.info("Stopping JournalNode Sync.");
+          } else {
+            LOG.warn("JournalNodeSyncer interrupted", e);
+          }
+          Thread.currentThread().interrupt();
+          return;
         }
       }
     });
@@ -179,7 +232,7 @@ public class JournalNodeSyncer {
     LOG.info("Syncing Journal " + jn.getBoundIpcAddress().getAddress() + ":"
         + jn.getBoundIpcAddress().getPort() + " with "
         + otherJNProxies.get(index) + ", journal id: " + jid);
-    final QJournalProtocolPB jnProxy = otherJNProxies.get(index).jnProxy;
+    final InterQJournalProtocol jnProxy = otherJNProxies.get(index).jnProxy;
     if (jnProxy == null) {
       LOG.error("JournalNode Proxy not found.");
       return;
@@ -195,12 +248,10 @@ public class JournalNodeSyncer {
 
     GetEditLogManifestResponseProto editLogManifest;
     try {
-      editLogManifest = jnProxy.getEditLogManifest(null,
-          GetEditLogManifestRequestProto.newBuilder().setJid(jidProto)
-              .setSinceTxId(0)
-              .setInProgressOk(false).build());
-    } catch (ServiceException e) {
-      LOG.error("Could not sync with Journal at " +
+      editLogManifest = jnProxy.getEditLogManifestFromJournal(jid,
+          nameServiceId, 0, false);
+    } catch (IOException e) {
+      LOG.debug("Could not sync with Journal at {}.",
           otherJNProxies.get(journalNodeIndexForSync), e);
       return;
     }
@@ -210,34 +261,66 @@ public class JournalNodeSyncer {
   }
 
   private List<InetSocketAddress> getOtherJournalNodeAddrs() {
-    URI uri = null;
+    String uriStr = "";
     try {
-      String uriStr = conf.get(DFSConfigKeys.DFS_NAMENODE_SHARED_EDITS_DIR_KEY);
+      uriStr = conf.getTrimmed(DFSConfigKeys.DFS_NAMENODE_SHARED_EDITS_DIR_KEY);
+
       if (uriStr == null || uriStr.isEmpty()) {
-        LOG.warn("Could not construct Shared Edits Uri");
-        return null;
+        if (nameServiceId != null) {
+          uriStr = conf.getTrimmed(DFSConfigKeys
+              .DFS_NAMENODE_SHARED_EDITS_DIR_KEY + "." + nameServiceId);
+        }
       }
-      uri = new URI(uriStr);
-      return Util.getLoggerAddresses(uri,
-          Sets.newHashSet(jn.getBoundIpcAddress()));
+
+      if (uriStr == null || uriStr.isEmpty()) {
+        HashSet<String> sharedEditsUri = Sets.newHashSet();
+        if (nameServiceId != null) {
+          Collection<String> nnIds = DFSUtilClient.getNameNodeIds(
+              conf, nameServiceId);
+          for (String nnId : nnIds) {
+            String suffix = nameServiceId + "." + nnId;
+            uriStr = conf.getTrimmed(DFSConfigKeys
+                .DFS_NAMENODE_SHARED_EDITS_DIR_KEY + "." + suffix);
+            sharedEditsUri.add(uriStr);
+          }
+          if (sharedEditsUri.size() > 1) {
+            uriStr = null;
+            LOG.error("The conf property " + DFSConfigKeys
+                .DFS_NAMENODE_SHARED_EDITS_DIR_KEY + " not set properly, " +
+                "it has been configured with different journalnode values " +
+                sharedEditsUri.toString() + " for a" +
+                " single nameserviceId" + nameServiceId);
+          }
+        }
+      }
+
+      if (uriStr == null || uriStr.isEmpty()) {
+        LOG.error("Could not construct Shared Edits Uri");
+        return null;
+      } else {
+        return getJournalAddrList(uriStr);
+      }
+
     } catch (URISyntaxException e) {
       LOG.error("The conf property " + DFSConfigKeys
           .DFS_NAMENODE_SHARED_EDITS_DIR_KEY + " not set properly.");
     } catch (IOException e) {
-      LOG.error("Could not parse JournalNode addresses: " + uri);
+      LOG.error("Could not parse JournalNode addresses: " + uriStr);
     }
     return null;
   }
 
-  private JournalIdProto convertJournalId(String journalId) {
-    return QJournalProtocolProtos.JournalIdProto.newBuilder()
-      .setIdentifier(journalId)
-      .build();
+  private List<InetSocketAddress> getJournalAddrList(String uriStr) throws
+      URISyntaxException,
+      IOException {
+    URI uri = new URI(uriStr);
+    return Util.getLoggerAddresses(uri,
+        Sets.newHashSet(jn.getBoundIpcAddress()));
   }
 
   private void getMissingLogSegments(List<RemoteEditLog> thisJournalEditLogs,
-      GetEditLogManifestResponseProto response,
-      JournalNodeProxy remoteJNproxy) {
+                                     GetEditLogManifestResponseProto response,
+                                     JournalNodeProxy remoteJNproxy) {
 
     List<RemoteEditLog> otherJournalEditLogs = PBHelper.convert(
         response.getManifest()).getLogs();
@@ -257,19 +340,21 @@ public class JournalNodeSyncer {
         try {
           if (remoteJNproxy.httpServerUrl == null) {
             if (response.hasFromURL()) {
-              URI uri = URI.create(response.getFromURL());
-              remoteJNproxy.httpServerUrl = getHttpServerURI(uri.getScheme(),
-                  uri.getHost(), uri.getPort());
+              remoteJNproxy.httpServerUrl = getHttpServerURI(
+                  response.getFromURL(), remoteJNproxy.jnAddr.getHostName());
             } else {
-              remoteJNproxy.httpServerUrl = getHttpServerURI("http",
-                  remoteJNproxy.jnAddr.getHostName(), response.getHttpPort());
+              LOG.error("EditLogManifest response does not have fromUrl " +
+                  "field set. Aborting current sync attempt");
+              break;
             }
           }
 
           String urlPath = GetJournalEditServlet.buildPath(jid, missingLog
-              .getStartTxId(), nsInfo);
+              .getStartTxId(), nsInfo, false);
           url = new URL(remoteJNproxy.httpServerUrl, urlPath);
           success = downloadMissingLogSegment(url, missingLog);
+        } catch (URISyntaxException e) {
+          LOG.error("EditLogManifest's fromUrl field syntax incorrect", e);
         } catch (MalformedURLException e) {
           LOG.error("MalformedURL when download missing log segment", e);
         } catch (Exception e) {
@@ -297,46 +382,47 @@ public class JournalNodeSyncer {
 
     List<RemoteEditLog> missingEditLogs = Lists.newArrayList();
 
-    int thisJnIndex = 0, otherJnIndex = 0;
-    int thisJnNumLogs = thisJournalEditLogs.size();
-    int otherJnNumLogs = otherJournalEditLogs.size();
+    int localJnIndex = 0, remoteJnIndex = 0;
+    int localJnNumLogs = thisJournalEditLogs.size();
+    int remoteJnNumLogs = otherJournalEditLogs.size();
 
-    while (thisJnIndex < thisJnNumLogs && otherJnIndex < otherJnNumLogs) {
-      long localJNstartTxId = thisJournalEditLogs.get(thisJnIndex)
+    while (localJnIndex < localJnNumLogs && remoteJnIndex < remoteJnNumLogs) {
+      long localJNstartTxId = thisJournalEditLogs.get(localJnIndex)
           .getStartTxId();
-      long remoteJNstartTxId = otherJournalEditLogs.get(otherJnIndex)
+      long remoteJNstartTxId = otherJournalEditLogs.get(remoteJnIndex)
           .getStartTxId();
 
       if (localJNstartTxId == remoteJNstartTxId) {
-        thisJnIndex++;
-        otherJnIndex++;
+        localJnIndex++;
+        remoteJnIndex++;
       } else if (localJNstartTxId > remoteJNstartTxId) {
-        missingEditLogs.add(otherJournalEditLogs.get(otherJnIndex));
-        otherJnIndex++;
+        missingEditLogs.add(otherJournalEditLogs.get(remoteJnIndex));
+        remoteJnIndex++;
       } else {
-        thisJnIndex++;
+        localJnIndex++;
       }
     }
 
-    if (otherJnIndex < otherJnNumLogs) {
-      for (; otherJnIndex < otherJnNumLogs; otherJnIndex++) {
-        missingEditLogs.add(otherJournalEditLogs.get(otherJnIndex));
+    if (remoteJnIndex < remoteJnNumLogs) {
+      for (; remoteJnIndex < remoteJnNumLogs; remoteJnIndex++) {
+        missingEditLogs.add(otherJournalEditLogs.get(remoteJnIndex));
       }
     }
 
     return missingEditLogs;
   }
 
-  private URL getHttpServerURI(String scheme, String hostname, int port)
-    throws MalformedURLException {
-    return new URL(scheme, hostname, port, "");
+  private URL getHttpServerURI(String fromUrl, String hostAddr)
+      throws URISyntaxException, MalformedURLException {
+    URI uri = new URI(fromUrl);
+    return new URL(uri.getScheme(), hostAddr, uri.getPort(), "");
   }
 
   /**
    * Transfer an edit log from one journal node to another for sync-up.
    */
-  private boolean downloadMissingLogSegment(URL url, RemoteEditLog log) throws
-      IOException {
+  private boolean downloadMissingLogSegment(URL url, RemoteEditLog log)
+      throws IOException {
     LOG.info("Downloading missing Edit Log from " + url + " to " + jnStorage
         .getRoot());
 
@@ -350,37 +436,49 @@ public class JournalNodeSyncer {
       return true;
     }
 
-    final long milliTime = Time.monotonicNow();
-    File tmpEditsFile = jnStorage.getTemporaryEditsFile(log.getStartTxId(), log
-        .getEndTxId(), milliTime);
-    try {
-      Util.doGetUrl(url, ImmutableList.of(tmpEditsFile), jnStorage, false,
-          logSegmentTransferTimeout, throttler);
-    } catch (IOException e) {
-      LOG.error("Download of Edit Log file for Syncing failed. Deleting temp " +
-          "file: " + tmpEditsFile);
-      if (!tmpEditsFile.delete()) {
-        LOG.warn("Deleting " + tmpEditsFile + " has failed");
+    // Download the log segment to current.tmp directory first.
+    File tmpEditsFile = jnStorage.getTemporaryEditsFile(
+        log.getStartTxId(), log.getEndTxId());
+
+    if (!SecurityUtil.doAsLoginUser(() -> {
+      if (UserGroupInformation.isSecurityEnabled()) {
+        UserGroupInformation.getCurrentUser().checkTGTAndReloginFromKeytab();
       }
+      try {
+        Util.doGetUrl(url, ImmutableList.of(tmpEditsFile), jnStorage, false,
+            logSegmentTransferTimeout, throttler);
+      } catch (IOException e) {
+        LOG.error("Download of Edit Log file for Syncing failed. Deleting temp "
+            + "file: " + tmpEditsFile, e);
+        if (!tmpEditsFile.delete()) {
+          LOG.warn("Deleting " + tmpEditsFile + " has failed");
+        }
+        return false;
+      }
+      return true;
+    })) {
       return false;
     }
     LOG.info("Downloaded file " + tmpEditsFile.getName() + " of size " +
         tmpEditsFile.length() + " bytes.");
 
-    LOG.debug("Renaming " + tmpEditsFile.getName() + " to "
-        + finalEditsFile.getName());
-    boolean renameSuccess = journal.renameTmpSegment(tmpEditsFile,
-        finalEditsFile, log.getEndTxId());
-    if (!renameSuccess) {
-      //If rename is not successful, delete the tmpFile
-      LOG.debug("Renaming unsuccessful. Deleting temporary file: "
-          + tmpEditsFile);
-      if (!tmpEditsFile.delete()) {
+    boolean moveSuccess = false;
+    try {
+      moveSuccess = journal.moveTmpSegmentToCurrent(tmpEditsFile,
+          finalEditsFile, log.getEndTxId());
+    } catch (IOException e) {
+      LOG.info("Could not move %s to current directory.", tmpEditsFile);
+    } finally {
+      if (tmpEditsFile.exists() && !tmpEditsFile.delete()) {
         LOG.warn("Deleting " + tmpEditsFile + " has failed");
       }
+    }
+    if (moveSuccess) {
+      metrics.incrNumEditLogsSynced();
+      return true;
+    } else {
       return false;
     }
-    return true;
   }
 
   private static DataTransferThrottler getThrottler(Configuration conf) {
@@ -396,13 +494,26 @@ public class JournalNodeSyncer {
 
   private class JournalNodeProxy {
     private final InetSocketAddress jnAddr;
-    private final QJournalProtocolPB jnProxy;
+    private final InterQJournalProtocol jnProxy;
     private URL httpServerUrl;
 
     JournalNodeProxy(InetSocketAddress jnAddr) throws IOException {
+      final Configuration confCopy = new Configuration(conf);
       this.jnAddr = jnAddr;
-      this.jnProxy = RPC.getProxy(QJournalProtocolPB.class,
-          RPC.getProtocolVersion(QJournalProtocolPB.class), jnAddr, conf);
+      this.jnProxy = SecurityUtil.doAsLoginUser(
+          new PrivilegedExceptionAction<InterQJournalProtocol>() {
+            @Override
+            public InterQJournalProtocol run() throws IOException {
+              RPC.setProtocolEngine(confCopy, InterQJournalProtocolPB.class,
+                  ProtobufRpcEngine2.class);
+              InterQJournalProtocolPB interQJournalProtocolPB = RPC.getProxy(
+                  InterQJournalProtocolPB.class,
+                  RPC.getProtocolVersion(InterQJournalProtocolPB.class),
+                  jnAddr, confCopy);
+              return new InterQJournalProtocolTranslatorPB(
+                  interQJournalProtocolPB);
+            }
+          });
     }
 
     @Override

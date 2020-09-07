@@ -21,6 +21,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.List;
 
+import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.permission.FsAction;
@@ -107,10 +108,10 @@ final class FSDirAppendOp {
       }
       final INodeFile file = INodeFile.valueOf(inode, path, true);
 
-      // not support appending file with striped blocks
-      if (file.isStriped()) {
+      if (file.isStriped() && !newBlock) {
         throw new UnsupportedOperationException(
-            "Cannot append to files with striped block " + path);
+            "Append on EC file without new block is not supported. Use "
+                + CreateFlag.NEW_BLOCK + " create flag while appending file.");
       }
 
       BlockManager blockManager = fsd.getBlockManager();
@@ -148,7 +149,8 @@ final class FSDirAppendOp {
       fsd.writeUnlock();
     }
 
-    HdfsFileStatus stat = FSDirStatAndListingOp.getFileInfo(fsd, iip);
+    HdfsFileStatus stat =
+        FSDirStatAndListingOp.getFileInfo(fsd, iip, false, false);
     if (lb != null) {
       NameNode.stateChangeLog.debug(
           "DIR* NameSystem.appendFile: file {} for {} at {} block {} block"

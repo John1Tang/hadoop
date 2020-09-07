@@ -20,23 +20,35 @@ package org.apache.hadoop.yarn.api;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.Range;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.yarn.api.resource.PlacementConstraint;
+import org.apache.hadoop.yarn.api.resource.PlacementConstraints;
 import org.junit.Assert;
 
 import java.lang.reflect.*;
 import java.nio.ByteBuffer;
 import java.util.*;
 
+import static org.apache.hadoop.yarn.api.resource.PlacementConstraints.NODE;
+import static org.apache.hadoop.yarn.api.resource.PlacementConstraints
+    .PlacementTargets.allocationTag;
+import static org.apache.hadoop.yarn.api.resource.PlacementConstraints.targetIn;
+
 /**
  * Generic helper class to validate protocol records.
  */
 public class BasePBImplRecordsTest {
-  static final Log LOG = LogFactory.getLog(BasePBImplRecordsTest.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(BasePBImplRecordsTest.class);
 
   @SuppressWarnings("checkstyle:visibilitymodifier")
   protected static HashMap<Type, Object> typeValueCache =
       new HashMap<Type, Object>();
+  @SuppressWarnings("checkstyle:visibilitymodifier")
+  protected static HashMap<Type, List<String>> excludedPropertiesMap =
+      new HashMap<>();
   private static Random rand = new Random();
   private static byte [] bytes = new byte[] {'1', '2', '3', '4'};
 
@@ -82,12 +94,16 @@ public class BasePBImplRecordsTest {
         ByteBuffer buff = ByteBuffer.allocate(4);
         rand.nextBytes(buff.array());
         return buff;
+      } else if (type.equals(PlacementConstraint.class)) {
+        PlacementConstraint.AbstractConstraint sConstraintExpr =
+            targetIn(NODE, allocationTag("foo"));
+        ret = PlacementConstraints.build(sConstraintExpr);
       }
     } else if (type instanceof ParameterizedType) {
       ParameterizedType pt = (ParameterizedType)type;
       Type rawType = pt.getRawType();
       Type [] params = pt.getActualTypeArguments();
-      // only support EnumSet<T>, List<T>, Set<T>, Map<K,V>
+      // only support EnumSet<T>, List<T>, Set<T>, Map<K,V>, Range<T>
       if (rawType.equals(EnumSet.class)) {
         if (params[0] instanceof Class) {
           Class c = (Class)(params[0]);
@@ -101,6 +117,11 @@ public class BasePBImplRecordsTest {
         Map<Object, Object> map = Maps.newHashMap();
         map.put(genTypeValue(params[0]), genTypeValue(params[1]));
         ret = map;
+      } else if (rawType.equals(Range.class)) {
+        ret = typeValueCache.get(rawType);
+        if (ret != null) {
+          return ret;
+        }
       }
     }
     if (ret == null) {
@@ -167,6 +188,10 @@ public class BasePBImplRecordsTest {
   private <R> Map<String, GetSetPair> getGetSetPairs(Class<R> recordClass)
       throws Exception {
     Map<String, GetSetPair> ret = new HashMap<String, GetSetPair>();
+    List<String> excluded = null;
+    if (excludedPropertiesMap.containsKey(recordClass.getClass())) {
+      excluded = excludedPropertiesMap.get(recordClass.getClass());
+    }
     Method [] methods = recordClass.getDeclaredMethods();
     // get all get methods
     for (int i = 0; i < methods.length; i++) {
@@ -223,6 +248,11 @@ public class BasePBImplRecordsTest {
       if ((gsp.getMethod == null) ||
           (gsp.setMethod == null)) {
         LOG.info(String.format("Exclude potential property: %s\n", gsp.propertyName));
+        itr.remove();
+      } else if ((excluded != null && excluded.contains(gsp.propertyName))) {
+        LOG.info(String.format(
+            "Excluding potential property(present in exclusion list): %s\n",
+            gsp.propertyName));
         itr.remove();
       } else {
         LOG.info(String.format("New property: %s type: %s", gsp.toString(), gsp.type));

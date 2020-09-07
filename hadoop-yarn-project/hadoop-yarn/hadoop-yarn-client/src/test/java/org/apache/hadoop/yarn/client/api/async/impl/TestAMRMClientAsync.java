@@ -18,10 +18,11 @@
 
 package org.apache.hadoop.yarn.client.api.async.impl;
 
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyFloat;
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Matchers.anyString;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyFloat;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -34,9 +35,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
@@ -61,12 +61,14 @@ import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Supplier;
 
 public class TestAMRMClientAsync {
 
-  private static final Log LOG = LogFactory.getLog(TestAMRMClientAsync.class);
+  private static final Logger LOG =
+          LoggerFactory.getLogger(TestAMRMClientAsync.class);
   
   @SuppressWarnings("unchecked")
   @Test(timeout=10000)
@@ -426,7 +428,7 @@ public class TestAMRMClientAsync {
     }
     AllocateResponse response =
         AllocateResponse.newInstance(0, completed, allocated,
-            new ArrayList<NodeReport>(), null, null, 1, null, nmTokens,
+            new ArrayList<NodeReport>(), null, null, 1, null, nmTokens, null,
             updatedContainers);
     return response;
   }
@@ -595,7 +597,7 @@ public class TestAMRMClientAsync {
 
     @Override
     public void onError(Throwable e) {
-      Assert.assertEquals(e.getMessage(), "Exception from callback handler");
+      assertThat(e).hasMessage("Exception from callback handler");
       callStopAndNotify();
     }
 

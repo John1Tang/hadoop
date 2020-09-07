@@ -20,14 +20,17 @@ package org.apache.hadoop.fs.contract;
 
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.PathCapabilities;
 import org.apache.hadoop.fs.RemoteIterator;
+import org.apache.hadoop.fs.StreamCapabilities;
 import org.apache.hadoop.io.IOUtils;
 import org.junit.Assert;
-import org.junit.internal.AssumptionViolatedException;
+import org.junit.AssumptionViolatedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,7 +72,8 @@ public class ContractTestUtils extends Assert {
    * Assert that a property in the property set matches the expected value.
    * @param props property set
    * @param key property name
-   * @param expected expected value. If null, the property must not be in the set
+   * @param expected expected value. If null, the property must not be in the
+   *                 set
    */
   public static void assertPropertyEquals(Properties props,
                                           String key,
@@ -145,18 +149,50 @@ public class ContractTestUtils extends Assert {
                                    int len,
                                    int buffersize,
                                    boolean overwrite) throws IOException {
+    writeDataset(fs, path, src, len, buffersize, overwrite, false);
+  }
+
+  /**
+   * Write a file.
+   * Optional flags control
+   * whether file overwrite operations should be enabled
+   * Optional using {@link org.apache.hadoop.fs.FSDataOutputStreamBuilder}
+   *
+   * @param fs filesystem
+   * @param path path to write to
+   * @param len length of data
+   * @param overwrite should the create option allow overwrites?
+   * @param useBuilder should use builder API to create file?
+   * @throws IOException IO problems
+   */
+  public static void writeDataset(FileSystem fs, Path path, byte[] src,
+      int len, int buffersize, boolean overwrite, boolean useBuilder)
+      throws IOException {
     assertTrue(
       "Not enough data in source array to write " + len + " bytes",
       src.length >= len);
-    FSDataOutputStream out = fs.create(path,
-                                       overwrite,
-                                       fs.getConf()
-                                         .getInt(IO_FILE_BUFFER_SIZE_KEY,
-                                             IO_FILE_BUFFER_SIZE_DEFAULT),
-                                       (short) 1,
-                                       buffersize);
-    out.write(src, 0, len);
-    out.close();
+    FSDataOutputStream out;
+    if (useBuilder) {
+      out = fs.createFile(path)
+          .overwrite(overwrite)
+          .replication((short) 1)
+          .bufferSize(buffersize)
+          .blockSize(buffersize)
+          .build();
+    } else {
+      out = fs.create(path,
+          overwrite,
+          fs.getConf()
+              .getInt(IO_FILE_BUFFER_SIZE_KEY,
+                  IO_FILE_BUFFER_SIZE_DEFAULT),
+          (short) 1,
+          buffersize);
+    }
+    try {
+      out.write(src, 0, len);
+    } finally {
+      out.close();
+    }
     assertFileHasLength(fs, path, len);
   }
 
@@ -197,12 +233,12 @@ public class ContractTestUtils extends Assert {
   public static void verifyFileContents(FileSystem fs,
                                         Path path,
                                         byte[] original) throws IOException {
+    assertIsFile(fs, path);
     FileStatus stat = fs.getFileStatus(path);
     String statText = stat.toString();
-    assertTrue("not a file " + statText, stat.isFile());
     assertEquals("wrong length " + statText, original.length, stat.getLen());
     byte[] bytes = readDataset(fs, path, original.length);
-    compareByteArrays(original,bytes,original.length);
+    compareByteArrays(original, bytes, original.length);
   }
 
   /**
@@ -221,7 +257,7 @@ public class ContractTestUtils extends Assert {
     stm.readFully(out);
     byte[] expected = Arrays.copyOfRange(fileContents, seekOff,
                                          seekOff + toRead);
-    compareByteArrays(expected, out,toRead);
+    compareByteArrays(expected, out, toRead);
   }
 
   /**
@@ -238,11 +274,11 @@ public class ContractTestUtils extends Assert {
     assertEquals("Number of bytes read != number written",
                         len, received.length);
     int errors = 0;
-    int first_error_byte = -1;
+    int firstErrorByte = -1;
     for (int i = 0; i < len; i++) {
       if (original[i] != received[i]) {
         if (errors == 0) {
-          first_error_byte = i;
+          firstErrorByte = i;
         }
         errors++;
       }
@@ -255,8 +291,8 @@ public class ContractTestUtils extends Assert {
       // the range either side of the first error to print
       // this is a purely arbitrary number, to aid user debugging
       final int overlap = 10;
-      for (int i = Math.max(0, first_error_byte - overlap);
-           i < Math.min(first_error_byte + overlap, len);
+      for (int i = Math.max(0, firstErrorByte - overlap);
+           i < Math.min(firstErrorByte + overlap, len);
            i++) {
         byte actual = received[i];
         byte expected = original[i];
@@ -372,6 +408,22 @@ public class ContractTestUtils extends Assert {
   }
 
   /**
+   * Rename operation. Safety check for attempts to rename the root directory.
+   * Verifies that src no longer exists after rename.
+   * @param fileSystem filesystem to work with
+   * @param src source path
+   * @param dst destination path
+   * @throws IOException If rename fails or src is the root directory.
+   */
+  public static void rename(FileSystem fileSystem, Path src, Path dst)
+      throws IOException {
+    rejectRootOperation(src, false);
+    assertTrue("rename(" + src + ", " + dst + ") failed",
+        fileSystem.rename(src, dst));
+    assertPathDoesNotExist(fileSystem, "renamed source dir", src);
+  }
+
+  /**
    * Block any operation on the root path. This is a safety check
    * @param path path in the filesystem
    * @param allowRootOperation can the root directory be manipulated?
@@ -407,8 +459,10 @@ public class ContractTestUtils extends Assert {
   public static FileStatus[] deleteChildren(FileSystem fileSystem,
       Path path,
       boolean recursive) throws IOException {
+    LOG.debug("Deleting children of {} (recursive={})", path, recursive);
     FileStatus[] children = listChildren(fileSystem, path);
     for (FileStatus entry : children) {
+      LOG.debug("Deleting {}", entry);
       fileSystem.delete(entry.getPath(), recursive);
     }
     return children;
@@ -449,7 +503,7 @@ public class ContractTestUtils extends Assert {
   public static void downgrade(String message, Throwable failure) {
     LOG.warn("Downgrading test " + message, failure);
     AssumptionViolatedException ave =
-      new AssumptionViolatedException(failure, null);
+        new AssumptionViolatedException(failure, null);
     throw ave;
   }
 
@@ -493,9 +547,9 @@ public class ContractTestUtils extends Assert {
                                          int expected) throws IOException {
     FileStatus status = fs.getFileStatus(path);
     assertEquals(
-      "Wrong file length of file " + path + " status: " + status,
-      expected,
-      status.getLen());
+        "Wrong file length of file " + path + " status: " + status,
+        expected,
+        status.getLen());
   }
 
   /**
@@ -506,7 +560,8 @@ public class ContractTestUtils extends Assert {
    */
   public static void assertIsDirectory(FileSystem fs,
                                        Path path) throws IOException {
-    FileStatus fileStatus = fs.getFileStatus(path);
+    FileStatus fileStatus = verifyPathExists(fs,
+        "Expected to find a directory", path);
     assertIsDirectory(fileStatus);
   }
 
@@ -517,6 +572,33 @@ public class ContractTestUtils extends Assert {
   public static void assertIsDirectory(FileStatus fileStatus) {
     assertTrue("Should be a directory -but isn't: " + fileStatus,
                fileStatus.isDirectory());
+  }
+
+  /**
+   * Assert that a path is Erasure Coded.
+   *
+   * @param fs filesystem
+   * @param path path of the file or directory
+   * @throws IOException on File IO problems
+   */
+  public static void assertErasureCoded(final FileSystem fs, final Path path)
+      throws IOException {
+    FileStatus fileStatus = fs.getFileStatus(path);
+    assertTrue(path + " must be erasure coded!", fileStatus.isErasureCoded());
+  }
+
+  /**
+   * Assert that a path is not Erasure Coded.
+   *
+   * @param fs filesystem
+   * @param path path of the file or directory
+   * @throws IOException on File IO problems
+   */
+  public static void assertNotErasureCoded(final FileSystem fs,
+      final Path path) throws IOException {
+    FileStatus fileStatus = fs.getFileStatus(path);
+    assertFalse(path + " should not be erasure coded!",
+        fileStatus.isErasureCoded());
   }
 
   /**
@@ -565,6 +647,23 @@ public class ContractTestUtils extends Assert {
   }
 
   /**
+   * Append to an existing file.
+   * @param fs filesystem
+   * @param path path to file
+   * @param data data to append. Can be null
+   * @throws IOException On any error
+   */
+  public static void appendFile(FileSystem fs,
+                                Path path,
+                                byte[] data) throws IOException {
+    try (FSDataOutputStream stream = fs.appendFile(path).build()) {
+      if (data != null && data.length > 0) {
+        stream.write(data);
+      }
+    }
+  }
+
+  /**
    * Touch a file.
    * @param fs filesystem
    * @param path path
@@ -578,7 +677,8 @@ public class ContractTestUtils extends Assert {
   /**
    * Delete a file/dir and assert that delete() returned true
    * <i>and</i> that the path no longer exists. This variant rejects
-   * all operations on root directories.
+   * all operations on root directories and requires the target path
+   * to exist before the deletion operation.
    * @param fs filesystem
    * @param file path to delete
    * @param recursive flag to enable recursive delete
@@ -592,8 +692,9 @@ public class ContractTestUtils extends Assert {
 
   /**
    * Delete a file/dir and assert that delete() returned true
-   * <i>and</i> that the path no longer exists. This variant rejects
-   * all operations on root directories
+   * <i>and</i> that the path no longer exists.
+   * This variant requires the target path
+   * to exist before the deletion operation.
    * @param fs filesystem
    * @param file path to delete
    * @param recursive flag to enable recursive delete
@@ -604,8 +705,28 @@ public class ContractTestUtils extends Assert {
       Path file,
       boolean recursive,
       boolean allowRootOperations) throws IOException {
+    assertDeleted(fs, file, true, recursive, allowRootOperations);
+  }
+
+  /**
+   * Delete a file/dir and assert that delete() returned true
+   * <i>and</i> that the path no longer exists.
+   * @param fs filesystem
+   * @param file path to delete
+   * @param requirePathToExist check for the path existing first?
+   * @param recursive flag to enable recursive delete
+   * @param allowRootOperations can the root dir be deleted?
+   * @throws IOException IO problems
+   */
+  public static void assertDeleted(FileSystem fs,
+      Path file,
+      boolean requirePathToExist,
+      boolean recursive,
+      boolean allowRootOperations) throws IOException {
     rejectRootOperation(file, allowRootOperations);
-    assertPathExists(fs, "about to be deleted file", file);
+    if (requirePathToExist) {
+      assertPathExists(fs, "about to be deleted file", file);
+    }
     boolean deleted = fs.delete(file, recursive);
     String dir = ls(fs, file.getParent());
     assertTrue("Delete failed on " + file + ": " + dir, deleted);
@@ -613,7 +734,30 @@ public class ContractTestUtils extends Assert {
   }
 
   /**
+   * Execute a {@link FileSystem#rename(Path, Path)}, and verify that the
+   * outcome was as expected. There is no preflight checking of arguments;
+   * everything is left to the rename() command.
+   * @param fs filesystem
+   * @param source source path
+   * @param dest destination path
+   * @param expectedResult expected return code
+   * @throws IOException on any IO failure.
+   */
+  public static void assertRenameOutcome(FileSystem fs,
+      Path source,
+      Path dest,
+      boolean expectedResult) throws IOException {
+    boolean result = fs.rename(source, dest);
+    if (expectedResult != result) {
+      fail(String.format("Expected rename(%s, %s) to return %b,"
+              + " but result was %b", source, dest, expectedResult, result));
+    }
+  }
+
+  /**
    * Read in "length" bytes, convert to an ascii string.
+   * This uses {@link #toChar(byte)} to escape bytes, so cannot be used
+   * for round trip operations.
    * @param fs filesystem
    * @param path path to read
    * @param length #of bytes to read.
@@ -627,6 +771,28 @@ public class ContractTestUtils extends Assert {
       byte[] buf = new byte[length];
       in.readFully(0, buf);
       return toChar(buf);
+    }
+  }
+
+  /**
+   * Read in "length" bytes, convert to UTF8 string.
+   * @param fs filesystem
+   * @param path path to read
+   * @param length #of bytes to read. If -1: use file length.
+   * @return the bytes read and converted to a string
+   * @throws IOException IO problems
+   */
+  public static String readUTF8(FileSystem fs,
+                                  Path path,
+                                  int length) throws IOException {
+    if (length < 0) {
+      FileStatus status = fs.getFileStatus(path);
+      length = (int) status.getLen();
+    }
+    try (FSDataInputStream in = fs.open(path)) {
+      byte[] buf = new byte[length];
+      in.readFully(0, buf);
+      return new String(buf, "UTF-8");
     }
   }
 
@@ -654,7 +820,8 @@ public class ContractTestUtils extends Assert {
    */
   public static String ls(FileSystem fileSystem, Path path) throws IOException {
     if (path == null) {
-      //surfaces when someone calls getParent() on something at the top of the path
+      // surfaces when someone calls getParent() on something at the top of the
+      // path
       return "/";
     }
     FileStatus[] stats;
@@ -691,6 +858,21 @@ public class ContractTestUtils extends Assert {
   /**
    * Assert that a file exists and whose {@link FileStatus} entry
    * declares that this is a file and not a symlink or directory.
+   *
+   * @param fileContext filesystem to resolve path against
+   * @param filename    name of the file
+   * @throws IOException IO problems during file operations
+   */
+  public static void assertIsFile(FileContext fileContext, Path filename)
+      throws IOException {
+    assertPathExists(fileContext, "Expected file", filename);
+    FileStatus status = fileContext.getFileStatus(filename);
+    assertIsFile(filename, status);
+  }
+
+  /**
+   * Assert that a file exists and whose {@link FileStatus} entry
+   * declares that this is a file and not a symlink or directory.
    * @param filename name of the file
    * @param status file status
    */
@@ -700,6 +882,36 @@ public class ContractTestUtils extends Assert {
                 status.isDirectory());
     assertFalse("File claims to be a symlink " + fileInfo,
                        status.isSymlink());
+  }
+
+  /**
+   * Assert that a varargs list of paths exist.
+   * @param fs filesystem
+   * @param message message for exceptions
+   * @param paths paths
+   * @throws IOException IO failure
+   */
+  public static void assertPathsExist(FileSystem fs,
+      String message,
+      Path... paths) throws IOException {
+    for (Path path : paths) {
+      assertPathExists(fs, message, path);
+    }
+  }
+
+  /**
+   * Assert that a varargs list of paths do not exist.
+   * @param fs filesystem
+   * @param message message for exceptions
+   * @param paths paths
+   * @throws IOException IO failure
+   */
+  public static void assertPathsDoNotExist(FileSystem fs,
+      String message,
+      Path... paths) throws IOException {
+    for (Path path : paths) {
+      assertPathDoesNotExist(fs, message, path);
+    }
   }
 
   /**
@@ -730,11 +942,49 @@ public class ContractTestUtils extends Assert {
    */
   public static void assertPathExists(FileSystem fileSystem, String message,
                                Path path) throws IOException {
-    if (!fileSystem.exists(path)) {
+    verifyPathExists(fileSystem, message, path);
+  }
+
+  /**
+   * Verify that a path exists, returning the file status of the path.
+   *
+   * @param fileSystem filesystem to examine
+   * @param message message to include in the assertion failure message
+   * @param path path in the filesystem
+   * @throws FileNotFoundException raised if the path is missing
+   * @throws IOException IO problems
+   */
+  public static FileStatus verifyPathExists(FileSystem fileSystem,
+      String message,
+      Path path) throws IOException {
+    try {
+      return fileSystem.getFileStatus(path);
+    } catch (FileNotFoundException e) {
       //failure, report it
-      ls(fileSystem, path.getParent());
-      throw new FileNotFoundException(message + ": not found " + path
-                                      + " in " + path.getParent());
+      LOG.error("{}: not found {}; parent listing is:\n{}",
+          message, path, ls(fileSystem, path.getParent()));
+      throw (IOException)new FileNotFoundException(
+          message + ": not found " + path + " in " + path.getParent())
+          .initCause(e);
+    }
+  }
+
+  /**
+   * Assert that a path exists -but make no assertions as to the
+   * type of that entry.
+   *
+   * @param fileContext fileContext to examine
+   * @param message     message to include in the assertion failure message
+   * @param path        path in the filesystem
+   * @throws FileNotFoundException raised if the path is missing
+   * @throws IOException           IO problems
+   */
+  public static void assertPathExists(FileContext fileContext, String message,
+      Path path) throws IOException {
+    if (!fileContext.util().exists(path)) {
+      //failure, report it
+      throw new FileNotFoundException(
+          message + ": not found " + path + " in " + path.getParent());
     }
   }
 
@@ -751,6 +1001,25 @@ public class ContractTestUtils extends Assert {
                                             Path path) throws IOException {
     try {
       FileStatus status = fileSystem.getFileStatus(path);
+      fail(message + ": unexpectedly found " + path + " as  " + status);
+    } catch (FileNotFoundException expected) {
+      //this is expected
+
+    }
+  }
+
+  /**
+   * Assert that a path does not exist.
+   *
+   * @param fileContext fileContext to examine
+   * @param message     message to include in the assertion failure message
+   * @param path        path in the filesystem
+   * @throws IOException IO problems
+   */
+  public static void assertPathDoesNotExist(FileContext fileContext,
+      String message, Path path) throws IOException {
+    try {
+      FileStatus status = fileContext.getFileStatus(path);
       fail(message + ": unexpectedly found " + path + " as  " + status);
     } catch (FileNotFoundException expected) {
       //this is expected
@@ -783,7 +1052,19 @@ public class ContractTestUtils extends Assert {
   }
 
   /**
-   * Test for the host being an OSX machine
+   * Execute {@link FileSystem#mkdirs(Path)}; expect {@code true} back.
+   * (Note: does not work for localFS if the directory already exists)
+   * Does not perform any validation of the created directory.
+   * @param fs filesystem
+   * @param dir directory to create
+   * @throws IOException IO Problem
+   */
+  public static void assertMkdirs(FileSystem fs, Path dir) throws IOException {
+    assertTrue("mkdirs(" + dir + ") returned false", fs.mkdirs(dir));
+  }
+
+  /**
+   * Test for the host being an OSX machine.
    * @return true if the JVM thinks that is running on OSX
    */
   public static boolean isOSX() {
@@ -806,8 +1087,9 @@ public class ContractTestUtils extends Assert {
           break;
         }
       }
-      if (mismatch)
+      if (mismatch) {
         break;
+      }
     }
     assertFalse("File content of file is not as expected at offset " + idx,
                 mismatch);
@@ -917,7 +1199,9 @@ public class ContractTestUtils extends Assert {
    * @throws IOException
    *    thrown if an I/O error occurs while writing or reading the test file
    */
-  public static void createAndVerifyFile(FileSystem fs, Path parent, final long fileSize)
+  public static void createAndVerifyFile(FileSystem fs,
+                                         Path parent,
+                                         final long fileSize)
       throws IOException {
     int testBufferSize = fs.getConf()
         .getInt(IO_CHUNK_BUFFER_SIZE, DEFAULT_IO_CHUNK_BUFFER_SIZE);
@@ -1196,6 +1480,104 @@ public class ContractTestUtils extends Assert {
     return list;
   }
 
+  /**
+   * Custom assert to test {@link StreamCapabilities}.
+   *
+   * @param stream The stream to test for StreamCapabilities
+   * @param shouldHaveCapabilities The array of expected capabilities
+   * @param shouldNotHaveCapabilities The array of unexpected capabilities
+   */
+  public static void assertCapabilities(
+      Object stream, String[] shouldHaveCapabilities,
+      String[] shouldNotHaveCapabilities) {
+    assertTrue("Stream should be instanceof StreamCapabilities",
+        stream instanceof StreamCapabilities);
+
+    StreamCapabilities source = (StreamCapabilities) stream;
+    if (shouldHaveCapabilities != null) {
+      for (String shouldHaveCapability : shouldHaveCapabilities) {
+        assertTrue("Should have capability: " + shouldHaveCapability,
+            source.hasCapability(shouldHaveCapability));
+      }
+    }
+
+    if (shouldNotHaveCapabilities != null) {
+      for (String shouldNotHaveCapability : shouldNotHaveCapabilities) {
+        assertFalse("Should not have capability: " + shouldNotHaveCapability,
+            source.hasCapability(shouldNotHaveCapability));
+      }
+    }
+  }
+
+  /**
+   * Custom assert to test {@link PathCapabilities}.
+   *
+   * @param source source (FS, FC, etc)
+   * @param path path to check
+   * @param capabilities The array of unexpected capabilities
+   */
+  public static void assertHasPathCapabilities(
+      final PathCapabilities source,
+      final Path path,
+      final String...capabilities) throws IOException {
+
+    for (String shouldHaveCapability: capabilities) {
+      assertTrue("Should have capability: " + shouldHaveCapability
+              + " under " + path,
+          source.hasPathCapability(path, shouldHaveCapability));
+    }
+  }
+
+  /**
+   * Custom assert to test that the named {@link PathCapabilities}
+   * are not supported.
+   *
+   * @param source source (FS, FC, etc)
+   * @param path path to check
+   * @param capabilities The array of unexpected capabilities
+   */
+  public static void assertLacksPathCapabilities(
+      final PathCapabilities source,
+      final Path path,
+      final String...capabilities) throws IOException {
+
+    for (String shouldHaveCapability: capabilities) {
+      assertFalse("Path  must not support capability: " + shouldHaveCapability
+              + " under " + path,
+          source.hasPathCapability(path, shouldHaveCapability));
+    }
+  }
+
+  /**
+   * Function which calls {@code InputStream.read()} and
+   * downgrades an IOE to a runtime exception.
+   * @param in input
+   * @return the read value
+   * @throws AssertionError on any IOException
+   */
+  public static int read(InputStream in) {
+    try {
+      return in.read();
+    } catch (IOException ex) {
+      throw new AssertionError(ex);
+    }
+  }
+
+  /**
+   * Read a whole stream; downgrades an IOE to a runtime exception.
+   * @param in input
+   * @return the number of bytes read.
+   * @throws AssertionError on any IOException
+   */
+  public static long readStream(InputStream in) {
+    long count = 0;
+
+    while (read(in) >= 0) {
+      count++;
+    }
+    return count;
+  }
+
 
   /**
    * Results of recursive directory creation/scan operations.
@@ -1288,6 +1670,22 @@ public class ContractTestUtils extends Assert {
     }
 
     /**
+     * Dump the files and directories to a multi-line string for error
+     * messages and assertions.
+     * @return a dump of the internal state
+     */
+    private String dump() {
+      StringBuilder sb = new StringBuilder(toString());
+      sb.append("\nFiles:");
+      directories.forEach(p ->
+          sb.append("\n  \"").append(p.toString()));
+      sb.append("\nDirectories:");
+      files.forEach(p ->
+          sb.append("\n  \"").append(p.toString()));
+      return sb.toString();
+    }
+
+    /**
      * Equality check compares files and directory counts.
      * As these are non-final fields, this class cannot be used in
      * hash tables.
@@ -1327,7 +1725,7 @@ public class ContractTestUtils extends Assert {
      * @param o expected other entries.
      */
     public void assertSizeEquals(String text, long f, long d, long o) {
-      String self = toString();
+      String self = dump();
       Assert.assertEquals(text + ": file count in " + self,
           f, getFileCount());
       Assert.assertEquals(text + ": directory count in " + self,
@@ -1414,10 +1812,18 @@ public class ContractTestUtils extends Assert {
    * printing some useful results in the process.
    */
   public static final class NanoTimer {
-    private final long startTime;
+    private long startTime;
     private long endTime;
 
     public NanoTimer() {
+      startTime = now();
+    }
+
+    /**
+     * Reset the timer.  Equivalent to the reset button of a stopwatch.
+     */
+    public void reset() {
+      endTime = 0;
       startTime = now();
     }
 
@@ -1457,6 +1863,14 @@ public class ContractTestUtils extends Assert {
      */
     public long elapsedTime() {
       return now() - startTime;
+    }
+
+    /**
+     * Elapsed time in milliseconds; no rounding.
+     * @return elapsed time
+     */
+    public long elapsedTimeMs() {
+      return elapsedTime() / 1000000;
     }
 
     public double bandwidth(long bytes) {

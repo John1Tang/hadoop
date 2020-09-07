@@ -21,6 +21,7 @@ package org.apache.hadoop.yarn.server.nodemanager;
 import static org.apache.hadoop.fs.CreateFlag.CREATE;
 import static org.apache.hadoop.fs.CreateFlag.OVERWRITE;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -32,38 +33,39 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
-
-import org.apache.commons.lang.math.RandomUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import java.util.Optional;
+import org.apache.commons.lang3.RandomUtils;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.hdfs.protocol.datatransfer.IOStreamPair;
+import org.apache.hadoop.service.ServiceStateException;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.Shell.CommandExecutor;
 import org.apache.hadoop.util.Shell.ExitCodeException;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
-import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ConfigurationException;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerDiagnosticsUpdateEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainerLaunch;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ContainerLocalizer;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerExecutionException;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerExecContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerLivenessContext;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerReapContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerSignalContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerStartContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.DeletionAsUserContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.LocalizerStartContext;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The {@code DefaultContainerExecuter} class offers generic container
@@ -72,8 +74,8 @@ import com.google.common.base.Optional;
  */
 public class DefaultContainerExecutor extends ContainerExecutor {
 
-  private static final Log LOG = LogFactory
-      .getLog(DefaultContainerExecutor.class);
+  private static final Logger LOG =
+       LoggerFactory.getLogger(DefaultContainerExecutor.class);
 
   private static final int WIN_MAX_PATH = 260;
 
@@ -134,7 +136,7 @@ public class DefaultContainerExecutor extends ContainerExecutor {
   }
 
   @Override
-  public void init() throws IOException {
+  public void init(Context nmContext) throws IOException {
     // nothing to do or verify here
   }
 
@@ -159,23 +161,22 @@ public class DefaultContainerExecutor extends ContainerExecutor {
     // randomly choose the local directory
     Path appStorageDir = getWorkingDir(localDirs, user, appId);
 
-    String tokenFn =
-        String.format(ContainerLocalizer.TOKEN_FILE_NAME_FMT, locId);
+    String tokenFn = String.format(TOKEN_FILE_NAME_FMT, locId);
     Path tokenDst = new Path(appStorageDir, tokenFn);
     copyFile(nmPrivateContainerTokensPath, tokenDst, user);
-    LOG.info("Copying from " + nmPrivateContainerTokensPath
-        + " to " + tokenDst);
+    LOG.info("Copying from {} to {}", nmPrivateContainerTokensPath, tokenDst);
 
 
     FileContext localizerFc =
         FileContext.getFileContext(lfs.getDefaultFileSystem(), getConf());
     localizerFc.setUMask(lfs.getUMask());
     localizerFc.setWorkingDirectory(appStorageDir);
-    LOG.info("Localizer CWD set to " + appStorageDir + " = " 
-        + localizerFc.getWorkingDirectory());
+    LOG.info("Localizer CWD set to {} = {}", appStorageDir,
+        localizerFc.getWorkingDirectory());
 
     ContainerLocalizer localizer =
-        createContainerLocalizer(user, appId, locId, localDirs, localizerFc);
+        createContainerLocalizer(user, appId, locId, tokenFn, localDirs,
+            localizerFc);
     // TODO: DO it over RPC for maintaining similarity?
     localizer.runLocalization(nmAddr);
   }
@@ -199,20 +200,23 @@ public class DefaultContainerExecutor extends ContainerExecutor {
   @Private
   @VisibleForTesting
   protected ContainerLocalizer createContainerLocalizer(String user,
-      String appId, String locId, List<String> localDirs,
+      String appId, String locId, String tokenFileName, List<String> localDirs,
       FileContext localizerFc) throws IOException {
     ContainerLocalizer localizer =
-        new ContainerLocalizer(localizerFc, user, appId, locId,
+        new ContainerLocalizer(localizerFc, user, appId, locId, tokenFileName,
             getPaths(localDirs),
             RecordFactoryProvider.getRecordFactory(getConf()));
     return localizer;
   }
 
   @Override
-  public int launchContainer(ContainerStartContext ctx) throws IOException {
+  public int launchContainer(ContainerStartContext ctx)
+      throws IOException, ConfigurationException {
     Container container = ctx.getContainer();
     Path nmPrivateContainerScriptPath = ctx.getNmPrivateContainerScriptPath();
     Path nmPrivateTokensPath = ctx.getNmPrivateTokensPath();
+    Path nmPrivateKeystorePath = ctx.getNmPrivateKeystorePath();
+    Path nmPrivateTruststorePath = ctx.getNmPrivateTruststorePath();
     String user = ctx.getUser();
     Path containerWorkDir = ctx.getContainerWorkDir();
     List<String> localDirs = ctx.getLocalDirs();
@@ -248,6 +252,18 @@ public class DefaultContainerExecutor extends ContainerExecutor {
       new Path(containerWorkDir, ContainerLaunch.FINAL_CONTAINER_TOKENS_FILE);
     copyFile(nmPrivateTokensPath, tokenDst, user);
 
+    if (nmPrivateKeystorePath != null) {
+      Path keystoreDst =
+          new Path(containerWorkDir, ContainerLaunch.KEYSTORE_FILE);
+      copyFile(nmPrivateKeystorePath, keystoreDst, user);
+    }
+
+    if (nmPrivateTruststorePath != null) {
+      Path truststoreDst =
+          new Path(containerWorkDir, ContainerLaunch.TRUSTSTORE_FILE);
+      copyFile(nmPrivateTruststorePath, truststoreDst, user);
+    }
+
     // copy launch script to work dir
     Path launchDst =
         new Path(containerWorkDir, ContainerLaunch.CONTAINER_SCRIPT);
@@ -272,8 +288,8 @@ public class DefaultContainerExecutor extends ContainerExecutor {
     if (pidFile != null) {
       sb.writeLocalWrapperScript(launchDst, pidFile);
     } else {
-      LOG.info("Container " + containerIdStr
-          + " was marked as inactive. Returning terminated error");
+      LOG.info("Container {} pid file not set. Returning terminated error",
+          containerIdStr);
       return ExitCode.TERMINATED.getExitCode();
     }
     
@@ -291,10 +307,9 @@ public class DefaultContainerExecutor extends ContainerExecutor {
       
       if (isContainerActive(containerId)) {
         shExec.execute();
-      }
-      else {
-        LOG.info("Container " + containerIdStr +
-            " was marked as inactive. Returning terminated error");
+      } else {
+        LOG.info("Container {} was marked as inactive. "
+            + "Returning terminated error", containerIdStr);
         return ExitCode.TERMINATED.getExitCode();
       }
     } catch (IOException e) {
@@ -302,28 +317,27 @@ public class DefaultContainerExecutor extends ContainerExecutor {
         return -1;
       }
       int exitCode = shExec.getExitCode();
-      LOG.warn("Exit code from container " + containerId + " is : " + exitCode);
+      LOG.warn("Exit code from container {} is : {}", containerId, exitCode);
       // 143 (SIGTERM) and 137 (SIGKILL) exit codes means the container was
       // terminated/killed forcefully. In all other cases, log the
       // container-executor's output
       if (exitCode != ExitCode.FORCE_KILLED.getExitCode()
           && exitCode != ExitCode.TERMINATED.getExitCode()) {
-        LOG.warn("Exception from container-launch with container ID: "
-            + containerId + " and exit code: " + exitCode , e);
+        LOG.warn("Exception from container-launch with container ID: {}"
+            + " and exit code: {}", containerId, exitCode, e);
 
         StringBuilder builder = new StringBuilder();
-        builder.append("Exception from container-launch.\n");
-        builder.append("Container id: ").append(containerId).append("\n");
-        builder.append("Exit code: ").append(exitCode).append("\n");
-        if (!Optional.fromNullable(e.getMessage()).or("").isEmpty()) {
-          builder.append("Exception message: ");
-          builder.append(e.getMessage()).append("\n");
+        builder.append("Exception from container-launch.\n")
+            .append("Container id: ").append(containerId).append("\n")
+            .append("Exit code: ").append(exitCode).append("\n");
+        if (!Optional.ofNullable(e.getMessage()).orElse("").isEmpty()) {
+          builder.append("Exception message: ")
+              .append(e.getMessage()).append("\n");
         }
-        builder.append("Stack trace: ");
-        builder.append(StringUtils.stringifyException(e)).append("\n");
+
         if (!shExec.getOutput().isEmpty()) {
-          builder.append("Shell output: ");
-          builder.append(shExec.getOutput()).append("\n");
+          builder.append("Shell output: ")
+              .append(shExec.getOutput()).append("\n");
         }
         String diagnostics = builder.toString();
         logOutput(diagnostics);
@@ -338,6 +352,12 @@ public class DefaultContainerExecutor extends ContainerExecutor {
       if (shExec != null) shExec.close();
     }
     return 0;
+  }
+
+  @Override
+  public int relaunchContainer(ContainerStartContext ctx)
+      throws IOException, ConfigurationException {
+    return launchContainer(ctx);
   }
 
   /**
@@ -362,13 +382,13 @@ public class DefaultContainerExecutor extends ContainerExecutor {
     String[] command = getRunCommand(wrapperScriptPath,
         containerIdStr, user, pidFile, this.getConf(), resource);
 
-      LOG.info("launchContainer: " + Arrays.toString(command));
-      return new ShellCommandExecutor(
-          command,
-          workDir,
-          environment,
-          0L,
-          false);
+    LOG.info("launchContainer: {}", Arrays.toString(command));
+    return new ShellCommandExecutor(
+        command,
+        workDir,
+        environment,
+        0L,
+        false);
   }
 
   /**
@@ -414,15 +434,11 @@ public class DefaultContainerExecutor extends ContainerExecutor {
      */
     public void writeLocalWrapperScript(Path launchDst, Path pidFile)
         throws IOException {
-      DataOutputStream out = null;
-      PrintStream pout = null;
-
-      try {
-        out = lfs.create(wrapperScriptPath, EnumSet.of(CREATE, OVERWRITE));
-        pout = new PrintStream(out, false, "UTF-8");
+      try (DataOutputStream out =
+               lfs.create(wrapperScriptPath, EnumSet.of(CREATE, OVERWRITE));
+           PrintStream pout =
+               new PrintStream(out, false, "UTF-8")) {
         writeLocalWrapperScript(launchDst, pidFile, pout);
-      } finally {
-        IOUtils.cleanup(LOG, pout, out);
       }
     }
 
@@ -489,11 +505,10 @@ public class DefaultContainerExecutor extends ContainerExecutor {
 
     private void writeSessionScript(Path launchDst, Path pidFile)
         throws IOException {
-      DataOutputStream out = null;
-      PrintStream pout = null;
-      try {
-        out = lfs.create(sessionScriptPath, EnumSet.of(CREATE, OVERWRITE));
-        pout = new PrintStream(out, false, "UTF-8");
+      try (DataOutputStream out =
+               lfs.create(sessionScriptPath, EnumSet.of(CREATE, OVERWRITE));
+           PrintStream pout =
+               new PrintStream(out, false, "UTF-8")) {
         // We need to do a move as writing to a file is not atomic
         // Process reading a file being written to may get garbled data
         // hence write pid to tmp file first followed by a mv
@@ -503,8 +518,6 @@ public class DefaultContainerExecutor extends ContainerExecutor {
         pout.println("/bin/mv -f " + pidFile.toString() + ".tmp " + pidFile);
         String exec = Shell.isSetsidAvailable? "exec setsid" : "exec";
         pout.printf("%s /bin/bash \"%s\"", exec, launchDst.toUri().getPath());
-      } finally {
-        IOUtils.cleanup(LOG, pout, out);
       }
       lfs.setPermission(sessionScriptPath,
           ContainerExecutor.TASK_LAUNCH_SCRIPT_PERMISSION);
@@ -556,10 +569,8 @@ public class DefaultContainerExecutor extends ContainerExecutor {
     String user = ctx.getUser();
     String pid = ctx.getPid();
     Signal signal = ctx.getSignal();
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Sending signal " + signal.getValue() + " to pid " + pid
-          + " as user " + user);
-    }
+    LOG.debug("Sending signal {} to pid {} as user {}",
+        signal.getValue(), pid, user);
     if (!containerIsAlive(pid)) {
       return false;
     }
@@ -571,6 +582,17 @@ public class DefaultContainerExecutor extends ContainerExecutor {
       }
       throw e;
     }
+    return true;
+  }
+
+  /**
+   * No-op for reaping containers within the DefaultContainerExecutor.
+   *
+   * @param ctx Encapsulates information necessary for reaping containers.
+   * @return true given no operations are needed.
+   */
+  @Override
+  public boolean reapContainer(ContainerReapContext ctx) {
     return true;
   }
 
@@ -622,19 +644,19 @@ public class DefaultContainerExecutor extends ContainerExecutor {
     List<Path> baseDirs = ctx.getBasedirs();
 
     if (baseDirs == null || baseDirs.size() == 0) {
-      LOG.info("Deleting absolute path : " + subDir);
+      LOG.info("Deleting absolute path : {}", subDir);
       if (!lfs.delete(subDir, true)) {
         //Maybe retry
-        LOG.warn("delete returned false for path: [" + subDir + "]");
+        LOG.warn("delete returned false for path: [{}]", subDir);
       }
       return;
     }
     for (Path baseDir : baseDirs) {
       Path del = subDir == null ? baseDir : new Path(baseDir, subDir);
-      LOG.info("Deleting path : " + del);
+      LOG.info("Deleting path : {}", del);
       try {
         if (!lfs.delete(del, true)) {
-          LOG.warn("delete returned false for path: [" + del + "]");
+          LOG.warn("delete returned false for path: [{}]", del);
         }
       } catch (FileNotFoundException e) {
         continue;
@@ -717,7 +739,7 @@ public class DefaultContainerExecutor extends ContainerExecutor {
       try {
         space = getDiskFreeSpace(curBase);
       } catch (IOException e) {
-        LOG.warn("Unable to get Free Space for " + curBase.toString(), e);
+        LOG.warn("Unable to get Free Space for {}", curBase, e);
       }
       availableOnDisk[i++] = space;
       totalAvailable += space;
@@ -797,7 +819,7 @@ public class DefaultContainerExecutor extends ContainerExecutor {
         createDir(getUserCacheDir(new Path(localDir), user), userperms, true,
             user);
       } catch (IOException e) {
-        LOG.warn("Unable to create the user directory : " + localDir, e);
+        LOG.warn("Unable to create the user directory : {}", localDir, e);
         continue;
       }
       userDirStatus = true;
@@ -824,7 +846,7 @@ public class DefaultContainerExecutor extends ContainerExecutor {
    */
   void createUserCacheDirs(List<String> localDirs, String user)
       throws IOException {
-    LOG.info("Initializing user " + user);
+    LOG.info("Initializing user {}", user);
 
     boolean appcacheDirStatus = false;
     boolean distributedCacheDirStatus = false;
@@ -839,7 +861,7 @@ public class DefaultContainerExecutor extends ContainerExecutor {
         createDir(appDir, appCachePerms, true, user);
         appcacheDirStatus = true;
       } catch (IOException e) {
-        LOG.warn("Unable to create app cache directory : " + appDir, e);
+        LOG.warn("Unable to create app cache directory : {}", appDir, e);
       }
       // create $local.dir/usercache/$user/filecache
       final Path distDir = getFileCacheDir(localDirPath, user);
@@ -847,7 +869,7 @@ public class DefaultContainerExecutor extends ContainerExecutor {
         createDir(distDir, fileperms, true, user);
         distributedCacheDirStatus = true;
       } catch (IOException e) {
-        LOG.warn("Unable to create file cache directory : " + distDir, e);
+        LOG.warn("Unable to create file cache directory : {}", distDir, e);
       }
     }
     if (!appcacheDirStatus) {
@@ -885,7 +907,8 @@ public class DefaultContainerExecutor extends ContainerExecutor {
         createDir(fullAppDir, appperms, true, user);
         initAppDirStatus = true;
       } catch (IOException e) {
-        LOG.warn("Unable to create app directory " + fullAppDir.toString(), e);
+        LOG.warn("Unable to create app directory {}",
+            fullAppDir, e);
       }
     }
     if (!initAppDirStatus) {
@@ -916,7 +939,7 @@ public class DefaultContainerExecutor extends ContainerExecutor {
       try {
         createDir(appLogDir, appLogDirPerms, true, user);
       } catch (IOException e) {
-        LOG.warn("Unable to create the app-log directory : " + appLogDir, e);
+        LOG.warn("Unable to create the app-log directory : {}", appLogDir, e);
         continue;
       }
       appLogDirStatus = true;
@@ -950,8 +973,8 @@ public class DefaultContainerExecutor extends ContainerExecutor {
       try {
         createDir(containerLogDir, containerLogDirPerms, true, user);
       } catch (IOException e) {
-        LOG.warn("Unable to create the container-log directory : "
-            + appLogDir, e);
+        LOG.warn("Unable to create the container-log directory : {}",
+            appLogDir, e);
         continue;
       }
       containerLogDirStatus = true;
@@ -988,6 +1011,18 @@ public class DefaultContainerExecutor extends ContainerExecutor {
   }
 
   /**
+   *
+   * @param ctx Encapsulates information necessary for exec containers.
+   * @return the input/output stream of interactive docker shell.
+   * @throws ContainerExecutionException
+   */
+  @Override
+  public IOStreamPair execContainer(ContainerExecContext ctx)
+      throws ContainerExecutionException {
+    return null;
+  }
+
+  /**
    * Return the list of paths of given local directories.
    *
    * @return the list of paths of given local directories
@@ -998,5 +1033,11 @@ public class DefaultContainerExecutor extends ContainerExecutor {
       paths.add(new Path(dirs.get(i)));
     }
     return paths;
+  }
+
+  @Override
+  public void updateYarnSysFS(Context ctx, String user,
+      String appId, String spec) throws IOException {
+    throw new ServiceStateException("Implementation unavailable");
   }
 }

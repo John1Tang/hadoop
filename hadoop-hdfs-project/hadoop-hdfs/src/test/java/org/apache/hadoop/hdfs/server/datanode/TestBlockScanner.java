@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SCANNER_SKIP_RECENT_ACCESSED;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_SCAN_PERIOD_HOURS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SCANNER_VOLUME_BYTES_PER_SECOND;
 import static org.apache.hadoop.hdfs.server.datanode.BlockScanner.Conf.INTERNAL_DFS_DATANODE_SCAN_PERIOD_MS;
@@ -25,6 +26,7 @@ import static org.apache.hadoop.hdfs.server.datanode.BlockScanner.Conf.INTERNAL_
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.fail;
 
 import java.io.Closeable;
 import java.io.File;
@@ -38,7 +40,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeoutException;
 
-import com.google.common.base.Supplier;
+import java.util.function.Supplier;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hdfs.AppendTestUtil;
@@ -93,7 +95,8 @@ public class TestBlockScanner {
 
     TestContext(Configuration conf, int numNameServices) throws Exception {
       this.numNameServices = numNameServices;
-      MiniDFSCluster.Builder bld = new MiniDFSCluster.Builder(conf).
+      File basedir = new File(GenericTestUtils.getRandomizedTempPath());
+      MiniDFSCluster.Builder bld = new MiniDFSCluster.Builder(conf, basedir).
           numDataNodes(1).
           storagesPerDatanode(1);
       if (numNameServices > 1) {
@@ -125,6 +128,7 @@ public class TestBlockScanner {
       if (cluster != null) {
         for (int i = 0; i < numNameServices; i++) {
           dfs[i].delete(new Path("/test"), true);
+          dfs[i].close();
         }
         cluster.shutdown();
       }
@@ -817,6 +821,7 @@ public class TestBlockScanner {
           "in recentSuspectBlocks.", info.goodBlocks.contains(first));
       info.blocksScanned = 0;
     }
+    ctx.close();
   }
 
   /**
@@ -873,6 +878,7 @@ public class TestBlockScanner {
       info.blocksScanned = 0;
     }
     info.sem.release(1);
+    ctx.close();
   }
 
   /**
@@ -933,12 +939,12 @@ public class TestBlockScanner {
     os.write(bytes);
     os.hflush();
     os.close();
-    fs.close();
 
     // verify that volume scanner does not find bad blocks after append.
     waitForRescan(info, numExpectedBlocks);
 
     GenericTestUtils.setLogLevel(DataNode.LOG, Level.INFO);
+    ctx.close();
   }
 
   private void waitForRescan(final TestScanResultHandler.Info info,
@@ -969,5 +975,41 @@ public class TestBlockScanner {
       assertEquals("Did not expect bad blocks.", 0, info.badBlocks.size());
       info.blocksScanned = 0;
     }
+  }
+
+  @Test
+  public void testSkipRecentAccessFile() throws Exception {
+    Configuration conf = new Configuration();
+    conf.setBoolean(DFS_BLOCK_SCANNER_SKIP_RECENT_ACCESSED, true);
+    conf.setLong(INTERNAL_DFS_DATANODE_SCAN_PERIOD_MS, 2000L);
+    conf.set(INTERNAL_VOLUME_SCANNER_SCAN_RESULT_HANDLER,
+        TestScanResultHandler.class.getName());
+    final TestContext ctx = new TestContext(conf, 1);
+    final int totalBlocks =  5;
+    ctx.createFiles(0, totalBlocks, 4096);
+
+    final TestScanResultHandler.Info info =
+        TestScanResultHandler.getInfo(ctx.volumes.get(0));
+    synchronized (info) {
+      info.shouldRun = true;
+      info.notify();
+    }
+    try {
+      GenericTestUtils.waitFor(() -> {
+        synchronized (info) {
+          return info.blocksScanned > 0;
+        }
+      }, 10, 500);
+      fail("Scan nothing for all files are accessed in last period.");
+    } catch (TimeoutException e) {
+      LOG.debug("Timeout for all files are accessed in last period.");
+    }
+    synchronized (info) {
+      info.shouldRun = false;
+      info.notify();
+    }
+    assertEquals("Should not scan block accessed in last period",
+        0, info.blocksScanned);
+    ctx.close();
   }
 }

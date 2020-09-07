@@ -19,8 +19,8 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo;
 
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.LimitedPrivate;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.conf.Configurable;
@@ -40,6 +40,7 @@ import org.apache.hadoop.yarn.api.records.QueueState;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.api.records.SchedulingRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
@@ -65,7 +66,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ContainerUpdates;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedContainerChangeRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplication;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
@@ -80,6 +80,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeAddedSc
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeResourceUpdateSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeUpdateSchedulerEvent;
+
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.ReleaseContainerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.PendingAsk;
 import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
@@ -106,7 +108,8 @@ public class FifoScheduler extends
     AbstractYarnScheduler<FifoAppAttempt, FiCaSchedulerNode> implements
     Configurable {
 
-  private static final Log LOG = LogFactory.getLog(FifoScheduler.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(FifoScheduler.class);
 
   private static final RecordFactory recordFactory = 
     RecordFactoryProvider.getRecordFactory(null);
@@ -240,17 +243,8 @@ public class FifoScheduler extends
     //Use ConcurrentSkipListMap because applications need to be ordered
     this.applications =
         new ConcurrentSkipListMap<>();
-    this.minimumAllocation =
-        Resources.createResource(conf.getInt(
-            YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB,
-            YarnConfiguration.DEFAULT_RM_SCHEDULER_MINIMUM_ALLOCATION_MB));
-    initMaximumResourceCapability(
-        Resources.createResource(conf.getInt(
-            YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_MB,
-            YarnConfiguration.DEFAULT_RM_SCHEDULER_MAXIMUM_ALLOCATION_MB),
-          conf.getInt(
-            YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_VCORES,
-            YarnConfiguration.DEFAULT_RM_SCHEDULER_MAXIMUM_ALLOCATION_VCORES)));
+    this.minimumAllocation = super.getMinimumAllocation();
+    initMaximumResourceCapability(super.getMaximumAllocation());
     this.usePortForNodeName = conf.getBoolean(
         YarnConfiguration.RM_SCHEDULER_INCLUDE_PORT_IN_NODE_NAME,
         YarnConfiguration.DEFAULT_RM_SCHEDULER_USE_PORT_FOR_NODE_NAME);
@@ -263,6 +257,9 @@ public class FifoScheduler extends
   public void serviceInit(Configuration conf) throws Exception {
     initScheduler(conf);
     super.serviceInit(conf);
+
+    // Initialize SchedulingMonitorManager
+    schedulingMonitorManager.initialize(rmContext, conf);
   }
 
   @Override
@@ -320,22 +317,34 @@ public class FifoScheduler extends
       reinitialize(Configuration conf, RMContext rmContext) throws IOException
   {
     setConf(conf);
+    super.reinitialize(conf, rmContext);
   }
 
   @Override
   public Allocation allocate(ApplicationAttemptId applicationAttemptId,
-      List<ResourceRequest> ask, List<ContainerId> release,
-      List<String> blacklistAdditions, List<String> blacklistRemovals,
+      List<ResourceRequest> ask, List<SchedulingRequest> schedulingRequests,
+      List<ContainerId> release, List<String> blacklistAdditions, List<String> blacklistRemovals,
       ContainerUpdates updateRequests) {
     FifoAppAttempt application = getApplicationAttempt(applicationAttemptId);
     if (application == null) {
-      LOG.error("Calling allocate on removed " +
-          "or non-existent application " + applicationAttemptId);
+      LOG.error("Calling allocate on removed or non existent application " +
+          applicationAttemptId.getApplicationId());
+      return EMPTY_ALLOCATION;
+    }
+
+    // The allocate may be the leftover from previous attempt, and it will
+    // impact current attempt, such as confuse the request and allocation for
+    // current attempt's AM container.
+    // Note outside precondition check for the attempt id may be
+    // outdated here, so double check it here is necessary.
+    if (!application.getApplicationAttemptId().equals(applicationAttemptId)) {
+      LOG.error("Calling allocate on previous or removed " +
+          "or non existent application attempt " + applicationAttemptId);
       return EMPTY_ALLOCATION;
     }
 
     // Sanity check
-    normalizeRequests(ask);
+    normalizeResourceRequests(ask);
 
     // Release containers
     releaseContainers(release, application);
@@ -388,9 +397,8 @@ public class FifoScheduler extends
     LOG.info("Accepted application " + applicationId + " from user: " + user
         + ", currently num of applications: " + applications.size());
     if (isAppRecovering) {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug(applicationId + " is recovering. Skip notifying APP_ACCEPTED");
-      }
+      LOG.debug("{} is recovering. Skip notifying APP_ACCEPTED",
+          applicationId);
     } else {
       rmContext.getDispatcher().getEventHandler()
         .handle(new RMAppEvent(applicationId, RMAppEventType.APP_ACCEPTED));
@@ -420,10 +428,8 @@ public class FifoScheduler extends
     LOG.info("Added Application Attempt " + appAttemptId
         + " to scheduler from user " + application.getUser());
     if (isAttemptRecovering) {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug(appAttemptId
-            + " is recovering. Skipping notifying ATTEMPT_ADDED");
-      }
+      LOG.debug("{} is recovering. Skipping notifying ATTEMPT_ADDED",
+          appAttemptId);
     } else {
       rmContext.getDispatcher().getEventHandler().handle(
         new RMAppAttemptEvent(appAttemptId,
@@ -809,6 +815,18 @@ public class FifoScheduler extends
           RMContainerEventType.EXPIRE);
     }
     break;
+    case RELEASE_CONTAINER: {
+      if (!(event instanceof ReleaseContainerEvent)) {
+        throw new RuntimeException("Unexpected event type: " + event);
+      }
+      RMContainer container = ((ReleaseContainerEvent) event).getContainer();
+      completedContainer(container,
+          SchedulerUtils.createAbnormalContainerStatus(
+              container.getContainerId(),
+              SchedulerUtils.RELEASED_CONTAINER),
+          RMContainerEventType.RELEASED);
+    }
+    break;
     default:
       LOG.error("Invalid eventtype " + event.getType() + ". Ignoring!");
     }
@@ -946,8 +964,10 @@ public class FifoScheduler extends
       return;
     }
 
-    if (Resources.greaterThanOrEqual(resourceCalculator, getClusterResource(),
-        node.getUnallocatedResource(), minimumAllocation)) {
+    // A decommissioned node might be removed before we get here
+    if (node != null &&
+        Resources.greaterThanOrEqual(resourceCalculator, getClusterResource(),
+            node.getUnallocatedResource(), minimumAllocation)) {
       LOG.debug("Node heartbeat " + nm.getNodeID() +
           " available resource = " + node.getUnallocatedResource());
 
@@ -958,6 +978,16 @@ public class FifoScheduler extends
     }
 
     updateAvailableResourcesMetrics();
+  }
+
+  @VisibleForTesting
+  @Override
+  public void killContainer(RMContainer container) {
+    ContainerStatus status = SchedulerUtils.createKilledContainerStatus(
+        container.getContainerId(),
+        "Killed by RM to simulate an AM container failure");
+    LOG.info("Killing container " + container);
+    completedContainer(container, status, RMContainerEventType.KILL);
   }
 
   @Override

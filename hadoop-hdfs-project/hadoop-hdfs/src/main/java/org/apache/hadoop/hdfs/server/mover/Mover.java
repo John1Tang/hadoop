@@ -22,8 +22,8 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import org.apache.commons.cli.*;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
@@ -41,11 +41,13 @@ import org.apache.hadoop.hdfs.server.balancer.ExitStatus;
 import org.apache.hadoop.hdfs.server.balancer.Matcher;
 import org.apache.hadoop.hdfs.server.balancer.NameNodeConnector;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.namenode.ErasureCodingPolicyManager;
 import org.apache.hadoop.hdfs.server.namenode.INode;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorageReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.security.SecurityUtil;
@@ -68,9 +70,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 @InterfaceAudience.Private
 public class Mover {
-  static final Log LOG = LogFactory.getLog(Mover.class);
-
-  static final Path MOVER_ID_PATH = new Path("/system/mover.id");
+  static final Logger LOG = LoggerFactory.getLogger(Mover.class);
 
   private static class StorageMap {
     private final StorageGroupMap<Source> sources
@@ -134,9 +134,17 @@ public class Mover {
     final int maxNoMoveInterval = conf.getInt(
         DFSConfigKeys.DFS_MOVER_MAX_NO_MOVE_INTERVAL_KEY,
         DFSConfigKeys.DFS_MOVER_MAX_NO_MOVE_INTERVAL_DEFAULT);
-    this.retryMaxAttempts = conf.getInt(
+    final int maxAttempts = conf.getInt(
         DFSConfigKeys.DFS_MOVER_RETRY_MAX_ATTEMPTS_KEY,
         DFSConfigKeys.DFS_MOVER_RETRY_MAX_ATTEMPTS_DEFAULT);
+    if (maxAttempts >= 0) {
+      this.retryMaxAttempts = maxAttempts;
+    } else {
+      LOG.warn(DFSConfigKeys.DFS_MOVER_RETRY_MAX_ATTEMPTS_KEY + " is "
+          + "configured with a negative value, using default value of "
+          + DFSConfigKeys.DFS_MOVER_RETRY_MAX_ATTEMPTS_DEFAULT);
+      this.retryMaxAttempts = DFSConfigKeys.DFS_MOVER_RETRY_MAX_ATTEMPTS_DEFAULT;
+    }
     this.retryCount = retryCount;
     this.dispatcher = new Dispatcher(nnc, Collections.<String> emptySet(),
         Collections.<String> emptySet(), movedWinWidth, moverThreads, 0,
@@ -180,6 +188,7 @@ public class Mover {
       return ExitStatus.ILLEGAL_ARGUMENTS;
     } catch (IOException e) {
       System.out.println(e + ".  Exiting ...");
+      LOG.error(e + ".  Exiting ...");
       return ExitStatus.IO_EXCEPTION;
     } finally {
       dispatcher.shutdownNow();
@@ -347,7 +356,7 @@ public class Mover {
     private void processRecursively(String parent, HdfsFileStatus status,
         Result result) {
       String fullPath = status.getFullName(parent);
-      if (status.isDir()) {
+      if (status.isDirectory()) {
         if (!fullPath.endsWith(Path.SEPARATOR)) {
           fullPath = fullPath + Path.SEPARATOR;
         }
@@ -375,10 +384,15 @@ public class Mover {
     /** @return true if it is necessary to run another round of migration */
     private void processFile(String fullPath, HdfsLocatedFileStatus status,
         Result result) {
-      final byte policyId = status.getStoragePolicy();
-      // currently we ignore files with unspecified storage policy
+      byte policyId = status.getStoragePolicy();
       if (policyId == HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED) {
-        return;
+        try {
+          // get default policy from namenode
+          policyId = dfs.getServerDefaults().getDefaultStoragePolicyId();
+        } catch (IOException e) {
+          LOG.warn("Failed to get default policy for " + fullPath, e);
+          return;
+        }
       }
       final BlockStoragePolicy policy = blockStoragePolicies[policyId];
       if (policy == null) {
@@ -389,7 +403,7 @@ public class Mover {
           status.getReplication());
 
       final ErasureCodingPolicy ecPolicy = status.getErasureCodingPolicy();
-      final LocatedBlocks locatedBlocks = status.getBlockLocations();
+      final LocatedBlocks locatedBlocks = status.getLocatedBlocks();
       final boolean lastBlkComplete = locatedBlocks.isLastBlockComplete();
       List<LocatedBlock> lbs = locatedBlocks.getLocatedBlocks();
       for (int i = 0; i < lbs.size(); i++) {
@@ -625,11 +639,11 @@ public class Mover {
     final long sleeptime =
         conf.getTimeDuration(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY,
             DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_DEFAULT,
-            TimeUnit.SECONDS) * 2000 +
+            TimeUnit.SECONDS, TimeUnit.MILLISECONDS) * 2 +
         conf.getTimeDuration(
             DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
             DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_DEFAULT,
-            TimeUnit.SECONDS) * 1000;
+            TimeUnit.SECONDS, TimeUnit.MILLISECONDS);
     AtomicInteger retryCount = new AtomicInteger(0);
     // TODO: Need to limit the size of the pinned blocks to limit memory usage
     Map<Long, Set<DatanodeInfo>> excludedPinnedBlocks = new HashMap<>();
@@ -639,7 +653,7 @@ public class Mover {
     List<NameNodeConnector> connectors = Collections.emptyList();
     try {
       connectors = NameNodeConnector.newNameNodeConnectors(namenodes,
-          Mover.class.getSimpleName(), MOVER_ID_PATH, conf,
+          Mover.class.getSimpleName(), HdfsServerConstants.MOVER_ID_PATH, conf,
           NameNodeConnector.DEFAULT_MAX_IDLE_ITERATIONS);
 
       while (connectors.size() > 0) {
@@ -649,10 +663,11 @@ public class Mover {
           NameNodeConnector nnc = iter.next();
           final Mover m = new Mover(nnc, conf, retryCount,
               excludedPinnedBlocks);
+
           final ExitStatus r = m.run();
 
           if (r == ExitStatus.SUCCESS) {
-            IOUtils.cleanup(LOG, nnc);
+            IOUtils.cleanupWithLogger(LOG, nnc);
             iter.remove();
           } else if (r != ExitStatus.IN_PROGRESS) {
             if (r == ExitStatus.NO_MOVE_PROGRESS) {
@@ -675,12 +690,12 @@ public class Mover {
       return ExitStatus.SUCCESS.getExitCode();
     } finally {
       for (NameNodeConnector nnc : connectors) {
-        IOUtils.cleanup(LOG, nnc);
+        IOUtils.cleanupWithLogger(LOG, nnc);
       }
     }
   }
 
-  static class Cli extends Configured implements Tool {
+  public static class Cli extends Configured implements Tool {
     private static final String USAGE = "Usage: hdfs mover "
         + "[-p <files/dirs> | -f <local file>]"
         + "\n\t-p <files/dirs>\ta space separated list of HDFS files/dirs to migrate."
@@ -713,7 +728,7 @@ public class Mover {
           }
         }
       } finally {
-        IOUtils.cleanup(LOG, reader);
+        IOUtils.cleanupWithLogger(LOG, reader);
       }
       return list.toArray(new String[list.size()]);
     }

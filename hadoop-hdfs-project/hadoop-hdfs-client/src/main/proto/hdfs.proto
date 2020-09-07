@@ -21,7 +21,7 @@
  * Please see http://wiki.apache.org/hadoop/Compatibility
  * for what changes are allowed for a *stable* .proto interface.
  */
-
+syntax="proto2";
 // This file contains protocol buffers that are used throughout HDFS -- i.e.
 // by the client, server, and data transfer protocols.
 
@@ -32,16 +32,31 @@ option java_generate_equals_and_hash = true;
 package hadoop.hdfs;
 
 import "Security.proto";
+import "acl.proto";
 
 /**
  * Extended block idenfies a block
  */
 message ExtendedBlockProto {
-  required string poolId = 1;   // Block pool id - gloablly unique across clusters
+  required string poolId = 1;   // Block pool id - globally unique across clusters
   required uint64 blockId = 2;  // the local id within a pool
   required uint64 generationStamp = 3;
   optional uint64 numBytes = 4 [default = 0];  // len does not belong in ebid 
                                                // here for historical reasons
+}
+
+
+/**
+* ProvidedStorageLocation will contain the exact location in the provided
+  storage. The path, offset and length will result in ranged read. The nonce
+  is there to verify that you receive what you expect.
+*/
+
+message ProvidedStorageLocationProto {
+  required string path = 1;
+  required int64 offset = 2;
+  required int64 length = 3;
+  required bytes nonce = 4;
 }
 
 /**
@@ -67,6 +82,19 @@ message DatanodeLocalInfoProto {
   required string softwareVersion = 1;
   required string configVersion = 2;
   required uint64 uptime = 3;
+}
+
+/**
+ * Datanode volume information
+ */
+message DatanodeVolumeInfoProto {
+  required string path = 1;
+  required StorageTypeProto storageType = 2;
+  required uint64 usedSpace = 3;
+  required uint64 freeSpace = 4;
+  required uint64 reservedSpace = 5;
+  required uint64 reservedSpaceForReplicas = 6;
+  required uint64 numBlocks = 7;
 }
 
 /**
@@ -104,6 +132,7 @@ message DatanodeInfoProto {
   optional string upgradeDomain = 14;
   optional uint64 lastBlockReportTime = 15 [default = 0];
   optional uint64 lastBlockReportMonotonic = 16 [default = 0];
+  optional uint32 numBlocks = 17 [default = 0];
 }
 
 /**
@@ -146,6 +175,7 @@ message ContentSummaryProto {
   optional uint64 snapshotFileCount = 9;
   optional uint64 snapshotDirectoryCount = 10;
   optional uint64 snapshotSpaceConsumed = 11;
+  optional string erasureCodingPolicy = 12;
 }
 
 /**
@@ -183,13 +213,6 @@ message CorruptFileBlocksProto {
 }
 
 /**
- * File or Directory permision - same spec as posix
- */
-message FsPermissionProto {
-  required uint32 perm = 1;       // Actually a short - only 16bits used
-}
-
-/**
  * Types of recognized storage media.
  */
 enum StorageTypeProto {
@@ -197,6 +220,7 @@ enum StorageTypeProto {
   SSD = 2;
   ARCHIVE = 3;
   RAM_DISK = 4;
+  PROVIDED = 5;
 }
 
 /**
@@ -248,6 +272,12 @@ message LocatedBlockProto {
   // striped block related fields
   optional bytes blockIndices = 9; // used for striped block to indicate block index for each storage
   repeated hadoop.common.TokenProto blockTokens = 10; // each internal block has a block token
+}
+
+message BatchedListingKeyProto {
+  required bytes checksum = 1;
+  required uint32 pathIndex = 2;
+  required bytes startAfter = 3;
 }
 
 message DataEncryptionKeyProto {
@@ -305,6 +335,20 @@ message ZoneEncryptionInfoProto {
   required CipherSuiteProto suite = 1;
   required CryptoProtocolVersionProto cryptoProtocolVersion = 2;
   required string keyName = 3;
+  optional ReencryptionInfoProto reencryptionProto = 4;
+}
+
+/**
+ * Re-encryption information for an encryption zone
+ */
+message ReencryptionInfoProto {
+  required string ezKeyVersionName = 1;
+  required uint64 submissionTime = 2;
+  required bool canceled = 3;
+  required int64 numReencrypted = 4;
+  required int64 numFailures = 5;
+  optional uint64 completionTime = 6;
+  optional string lastFile = 7;
 }
 
 /**
@@ -351,11 +395,41 @@ message ECSchemaProto {
   repeated ECSchemaOptionEntryProto options = 4;
 }
 
+/**
+ * EC policy state.
+ */
+enum ErasureCodingPolicyState {
+  DISABLED = 1;
+  ENABLED = 2;
+  REMOVED = 3;
+}
+
 message ErasureCodingPolicyProto {
-  required string name = 1;
-  required ECSchemaProto schema = 2;
-  required uint32 cellSize = 3;
+  optional string name = 1;
+  optional ECSchemaProto schema = 2;
+  optional uint32 cellSize = 3;
   required uint32 id = 4; // Actually a byte - only 8 bits used
+  optional ErasureCodingPolicyState state = 5 [default = ENABLED];
+}
+
+message AddErasureCodingPolicyResponseProto {
+  required ErasureCodingPolicyProto policy = 1;
+  required bool succeed = 2;
+  optional string errorMsg = 3;
+}
+
+message ECTopologyVerifierResultProto {
+  required string resultMessage = 1;
+  required bool isSupported = 2;
+}
+
+/**
+ * Placeholder type for consistent HDFS operations.
+ */
+message HdfsPathHandleProto {
+  optional uint64 inodeId = 1;
+  optional uint64 mtime = 2;
+  optional string path = 3;
 }
 
 /**
@@ -367,6 +441,12 @@ message HdfsFileStatusProto {
     IS_DIR = 1;
     IS_FILE = 2;
     IS_SYMLINK = 3;
+  }
+  enum Flags {
+    HAS_ACL   = 0x01; // has ACLs
+    HAS_CRYPT = 0x02; // encrypted
+    HAS_EC    = 0x04; // erasure coded
+    SNAPSHOT_ENABLED    = 0x08; // SNAPSHOT ENABLED
   }
   required FileType fileType = 1;
   required bytes path = 2;          // local name of inode encoded java UTF8
@@ -395,6 +475,9 @@ message HdfsFileStatusProto {
 
   // Optional field for erasure coding
   optional ErasureCodingPolicyProto ecPolicy = 17;
+
+  // Set of flags
+  optional uint32 flags = 18 [default = 0];
 }
 
 /**
@@ -406,6 +489,27 @@ enum ChecksumTypeProto {
   CHECKSUM_NULL = 0;
   CHECKSUM_CRC32 = 1;
   CHECKSUM_CRC32C = 2;
+}
+
+enum BlockChecksumTypeProto {
+  MD5CRC = 1;  // BlockChecksum obtained by taking the MD5 digest of chunk CRCs
+  COMPOSITE_CRC = 2;  // Chunk-independent CRC, optionally striped
+}
+
+/**
+ * Algorithms/types denoting how block-level checksums are computed using
+ * lower-level chunk checksums/CRCs.
+ * These options should be kept in sync with
+ * org.apache.hadoop.hdfs.protocol.BlockChecksumOptions.
+ */
+message BlockChecksumOptionsProto {
+  optional BlockChecksumTypeProto blockChecksumType = 1 [default = MD5CRC];
+
+  // Only used if blockChecksumType specifies a striped format, such as
+  // COMPOSITE_CRC. If so, then the blockChecksum in the response is expected
+  // to be the concatenation of N crcs, where
+  // N == ((requestedLength - 1) / stripedLength) + 1
+  optional uint64 stripeLength = 2;
 }
 
 /**
@@ -420,6 +524,9 @@ message FsServerDefaultsProto {
   optional bool encryptDataTransfer = 6 [default = false];
   optional uint64 trashInterval = 7 [default = 0];
   optional ChecksumTypeProto checksumType = 8 [default = CHECKSUM_CRC32];
+  optional string keyProviderUri = 9;
+  optional uint32 policyId = 10 [default = 0];
+  optional bool snapshotTrashRootEnabled = 11 [default = false];
 }
 
 
@@ -429,6 +536,18 @@ message FsServerDefaultsProto {
 message DirectoryListingProto {
   repeated HdfsFileStatusProto partialListing = 1;
   required uint32 remainingEntries  = 2;
+}
+
+message RemoteExceptionProto {
+  required string className = 1;
+  optional string message = 2;
+}
+
+// Directory listing result for a batched listing call.
+message BatchedDirectoryListingProto {
+  repeated HdfsFileStatusProto partialListing = 1;
+  required uint32 parentIdx = 2;
+  optional RemoteExceptionProto exception = 3;
 }
 
 /**
@@ -446,10 +565,32 @@ message SnapshottableDirectoryStatusProto {
 }
 
 /**
+ * Status of a snapshot directory: besides the normal information for
+ * a directory status, also include snapshot ID, and
+ * the full path of the parent directory.
+ */
+message SnapshotStatusProto {
+  required HdfsFileStatusProto dirStatus = 1;
+
+  // Fields specific for snapshot directory
+  required uint32 snapshotID = 2;
+  required bytes parent_fullpath = 3;
+  required bool isDeleted = 4;
+}
+
+
+/**
  * Snapshottable directory listing
  */
 message SnapshottableDirectoryListingProto {
   repeated SnapshottableDirectoryStatusProto snapshottableDirListing = 1;
+}
+
+/**
+ * Snapshot listing
+ */
+message SnapshotListingProto {
+  repeated SnapshotStatusProto snapshotListing = 1;
 }
 
 /**
@@ -472,6 +613,32 @@ message SnapshotDiffReportProto {
   repeated SnapshotDiffReportEntryProto diffReportEntries = 4;
 }
 
+/**
+ * Snapshot diff report listing entry
+ */
+message SnapshotDiffReportListingEntryProto {
+  required bytes fullpath = 1;
+  required uint64 dirId = 2;
+  required bool isReference = 3;
+  optional bytes targetPath = 4;
+  optional uint64 fileId = 5;
+}
+
+message SnapshotDiffReportCursorProto {
+  required bytes startPath = 1;
+  required int32 index = 2 [default = -1];
+}
+/**
+ * Snapshot diff report listing
+ */
+message SnapshotDiffReportListingProto {
+  // full path of the directory where snapshots were taken
+  repeated SnapshotDiffReportListingEntryProto modifiedEntries = 1;
+  repeated SnapshotDiffReportListingEntryProto createdEntries = 2;
+  repeated SnapshotDiffReportListingEntryProto deletedEntries = 3;
+  required bool isFromEarlier = 4;
+  optional SnapshotDiffReportCursorProto cursor = 5;
+}
 /**
  * Block information
  *
@@ -548,4 +715,7 @@ message BlockTokenSecretProto {
   optional string blockPoolId = 4;
   optional uint64 blockId = 5;
   repeated AccessModeProto modes = 6;
+  repeated StorageTypeProto storageTypes = 7;
+  repeated string storageIds = 8;
+  optional bytes handshakeSecret = 9;
 }

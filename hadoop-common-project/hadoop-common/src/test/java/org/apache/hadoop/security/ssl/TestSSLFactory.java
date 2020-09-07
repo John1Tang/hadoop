@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.security.ssl;
 
+import static org.apache.hadoop.security.ssl.KeyStoreTestUtil.TRUST_STORE_PASSWORD_DEFAULT;
 import static org.junit.Assert.assertTrue;
 
 import org.apache.hadoop.conf.Configuration;
@@ -25,7 +26,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.security.alias.CredentialProviderFactory;
 import org.apache.hadoop.security.alias.JavaKeyStoreProvider;
 import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.log4j.Level;
+import org.apache.hadoop.util.StringUtils;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -33,6 +34,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
 
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLEngine;
@@ -57,12 +59,13 @@ public class TestSSLFactory {
     new File(BASEDIR).getAbsolutePath();
   private String sslConfsDir;
   private static final String excludeCiphers = "TLS_ECDHE_RSA_WITH_RC4_128_SHA,"
-      + "SSL_DHE_RSA_EXPORT_WITH_DES40_CBC_SHA,"
+      + "SSL_DHE_RSA_EXPORT_WITH_DES40_CBC_SHA,  \n"
       + "SSL_RSA_WITH_DES_CBC_SHA,"
-      + "SSL_DHE_RSA_WITH_DES_CBC_SHA,"
-      + "SSL_RSA_EXPORT_WITH_RC4_40_MD5,"
+      + "SSL_DHE_RSA_WITH_DES_CBC_SHA,  "
+      + "SSL_RSA_EXPORT_WITH_RC4_40_MD5,\t \n"
       + "SSL_RSA_EXPORT_WITH_DES40_CBC_SHA,"
-      + "SSL_RSA_WITH_RC4_128_MD5";
+      + "SSL_RSA_WITH_RC4_128_MD5,"
+      + "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA";
 
   @BeforeClass
   public static void setUp() throws Exception {
@@ -190,7 +193,8 @@ public class TestSSLFactory {
     SSLEngine serverSSLEngine = serverSSLFactory.createSSLEngine();
     SSLEngine clientSSLEngine = clientSSLFactory.createSSLEngine();
     // client selects cipher suites excluded by server
-    clientSSLEngine.setEnabledCipherSuites(excludeCiphers.split(","));
+    clientSSLEngine.setEnabledCipherSuites(
+        StringUtils.getTrimmedStrings(excludeCiphers));
 
     // use the same buffer size for server and client.
     SSLSession session = clientSSLEngine.getSession();
@@ -404,7 +408,7 @@ public class TestSSLFactory {
     String keystore = new File(KEYSTORES_DIR, "keystore.jks").getAbsolutePath();
     String truststore = new File(KEYSTORES_DIR, "truststore.jks")
       .getAbsolutePath();
-    String trustPassword = "trustP";
+    String trustPassword = TRUST_STORE_PASSWORD_DEFAULT;
 
     // Create keys, certs, keystore, and truststore.
     KeyPair keyPair = KeyStoreTestUtil.generateKeyPair("RSA");
@@ -430,7 +434,7 @@ public class TestSSLFactory {
     if (mode == SSLFactory.Mode.SERVER) {
       sslConfFileName = "ssl-server.xml";
       sslConf = KeyStoreTestUtil.createServerSSLConfig(keystore, confPassword,
-        confKeyPassword, truststore);
+        confKeyPassword, truststore, trustPassword);
       if (useCredProvider) {
         File testDir = GenericTestUtils.getTestDir();
         final Path jksPath = new Path(testDir.toString(), "test.jks");
@@ -441,7 +445,7 @@ public class TestSSLFactory {
     } else {
       sslConfFileName = "ssl-client.xml";
       sslConf = KeyStoreTestUtil.createClientSSLConfig(keystore, confPassword,
-        confKeyPassword, truststore);
+        confKeyPassword, truststore, trustPassword);
     }
     KeyStoreTestUtil.saveConfig(new File(sslConfsDir, sslConfFileName), sslConf);
 

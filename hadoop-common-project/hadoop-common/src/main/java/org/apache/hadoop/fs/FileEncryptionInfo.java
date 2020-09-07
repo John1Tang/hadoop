@@ -17,6 +17,8 @@
  */
 package org.apache.hadoop.fs;
 
+import java.io.Serializable;
+
 import org.apache.commons.codec.binary.Hex;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.crypto.CipherSuite;
@@ -30,7 +32,9 @@ import static com.google.common.base.Preconditions.checkNotNull;
  * an encrypted file.
  */
 @InterfaceAudience.Private
-public class FileEncryptionInfo {
+public class FileEncryptionInfo implements Serializable {
+
+  private static final long serialVersionUID = 0x156abe03;
 
   private final CipherSuite cipherSuite;
   private final CryptoProtocolVersion version;
@@ -111,14 +115,14 @@ public class FileEncryptionInfo {
 
   @Override
   public String toString() {
-    StringBuilder builder = new StringBuilder("{");
-    builder.append("cipherSuite: " + cipherSuite);
-    builder.append(", cryptoProtocolVersion: " + version);
-    builder.append(", edek: " + Hex.encodeHexString(edek));
-    builder.append(", iv: " + Hex.encodeHexString(iv));
-    builder.append(", keyName: " + keyName);
-    builder.append(", ezKeyVersionName: " + ezKeyVersionName);
-    builder.append("}");
+    StringBuilder builder = new StringBuilder("{")
+        .append("cipherSuite: " + cipherSuite)
+        .append(", cryptoProtocolVersion: " + version)
+        .append(", edek: " + Hex.encodeHexString(edek))
+        .append(", iv: " + Hex.encodeHexString(iv))
+        .append(", keyName: " + keyName)
+        .append(", ezKeyVersionName: " + ezKeyVersionName)
+        .append("}");
     return builder.toString();
   }
 
@@ -132,14 +136,14 @@ public class FileEncryptionInfo {
    * Currently this method is used by CLI for backward compatibility.
    */
   public String toStringStable() {
-    StringBuilder builder = new StringBuilder("{");
-    builder.append("cipherSuite: " + cipherSuite);
-    builder.append(", cryptoProtocolVersion: " + version);
-    builder.append(", edek: " + Hex.encodeHexString(edek));
-    builder.append(", iv: " + Hex.encodeHexString(iv));
-    builder.append(", keyName: " + keyName);
-    builder.append(", ezKeyVersionName: " + ezKeyVersionName);
-    builder.append("}");
+    StringBuilder builder = new StringBuilder("{")
+        .append("cipherSuite: " + cipherSuite)
+        .append(", cryptoProtocolVersion: " + version)
+        .append(", edek: " + Hex.encodeHexString(edek))
+        .append(", iv: " + Hex.encodeHexString(iv))
+        .append(", keyName: " + keyName)
+        .append(", ezKeyVersionName: " + ezKeyVersionName)
+        .append("}");
     return builder.toString();
   }
 }

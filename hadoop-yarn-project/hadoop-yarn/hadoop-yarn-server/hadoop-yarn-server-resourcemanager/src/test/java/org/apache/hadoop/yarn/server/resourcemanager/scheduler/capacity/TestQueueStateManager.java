@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -157,6 +157,7 @@ public class TestQueueStateManager {
         CommonNodeLabelsManager.NO_LABEL);
     when(application.compareInputOrderTo(any(FiCaSchedulerApp.class)))
         .thenCallRealMethod();
+    when(application.isRunnable()).thenReturn(true);
     return application;
   }
 }

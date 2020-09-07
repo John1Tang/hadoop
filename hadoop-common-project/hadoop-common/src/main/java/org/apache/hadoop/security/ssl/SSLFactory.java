@@ -39,16 +39,15 @@ import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 
 /**
  * Factory that creates SSLEngine and SSLSocketFactory instances using
  * Hadoop configuration information.
- * <p/>
+ * <p>
  * This SSLFactory uses a {@link ReloadingX509TrustManager} instance,
  * which reloads public keys if the truststore file changes.
- * <p/>
+ * <p>
  * This factory is used to configure HTTPS in Hadoop HTTP based endpoints, both
  * client and server.
  */
@@ -58,7 +57,7 @@ public class SSLFactory implements ConnectionConfigurator {
   static final Logger LOG = LoggerFactory.getLogger(SSLFactory.class);
 
   @InterfaceAudience.Private
-  public static enum Mode { CLIENT, SERVER }
+  public enum Mode { CLIENT, SERVER }
 
   public static final String SSL_CLIENT_CONF_KEY = "hadoop.ssl.client.conf";
   public static final String SSL_CLIENT_CONF_DEFAULT = "ssl-client.xml";
@@ -73,7 +72,7 @@ public class SSLFactory implements ConnectionConfigurator {
   public static final String SSL_ENABLED_PROTOCOLS_KEY =
       "hadoop.ssl.enabled.protocols";
   public static final String SSL_ENABLED_PROTOCOLS_DEFAULT =
-      "TLSv1,SSLv2Hello,TLSv1.1,TLSv1.2";
+      "TLSv1.2";
 
   public static final String SSL_SERVER_NEED_CLIENT_AUTH =
       "ssl.server.need.client.auth";
@@ -109,6 +108,10 @@ public class SSLFactory implements ConnectionConfigurator {
   private Mode mode;
   private boolean requireClientCert;
   private SSLContext context;
+  // the java keep-alive cache relies on instance equivalence of the SSL socket
+  // factory.  in many java versions, SSLContext#getSocketFactory always
+  // returns a new instance which completely breaks the cache...
+  private SSLSocketFactory socketFactory;
   private HostnameVerifier hostnameVerifier;
   private KeyStoresFactory keystoresFactory;
 
@@ -140,13 +143,11 @@ public class SSLFactory implements ConnectionConfigurator {
 
     enabledProtocols = conf.getStrings(SSL_ENABLED_PROTOCOLS_KEY,
         SSL_ENABLED_PROTOCOLS_DEFAULT);
-    String excludeCiphersConf =
-        sslConf.get(SSL_SERVER_EXCLUDE_CIPHER_LIST, "");
-    if (excludeCiphersConf.isEmpty()) {
-      excludeCiphers = new LinkedList<String>();
-    } else {
-      LOG.debug("will exclude cipher suites: {}", excludeCiphersConf);
-      excludeCiphers = Arrays.asList(excludeCiphersConf.split(","));
+    excludeCiphers = Arrays.asList(
+        sslConf.getTrimmedStrings(SSL_SERVER_EXCLUDE_CIPHER_LIST));
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("will exclude cipher suites: {}",
+          StringUtils.join(",", excludeCiphers));
     }
   }
 
@@ -181,6 +182,9 @@ public class SSLFactory implements ConnectionConfigurator {
     context.init(keystoresFactory.getKeyManagers(),
                  keystoresFactory.getTrustManagers(), null);
     context.getDefaultSSLParameters().setProtocols(enabledProtocols);
+    if (mode == Mode.CLIENT) {
+      socketFactory = context.getSocketFactory();
+    }
     hostnameVerifier = getHostnameVerifier(conf);
   }
 
@@ -301,7 +305,7 @@ public class SSLFactory implements ConnectionConfigurator {
       throw new IllegalStateException(
           "Factory is not in CLIENT mode. Actual mode is " + mode.toString());
     }
-    return context.getSocketFactory();
+    return socketFactory;
   }
 
   /**

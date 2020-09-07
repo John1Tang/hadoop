@@ -48,7 +48,7 @@ import java.util.HashSet;
  * source.s1
  */
 class DistCpSync {
-  private DistCpOptions inputOptions;
+  private DistCpContext context;
   private Configuration conf;
   // diffMap maps snapshot diff op type to a list of diff ops.
   // It's initially created based on the snapshot diff. Then the individual
@@ -57,14 +57,17 @@ class DistCpSync {
   //
   private EnumMap<SnapshotDiffReport.DiffType, List<DiffInfo>> diffMap;
   private DiffInfo[] renameDiffs;
+  private CopyFilter copyFilter;
 
-  DistCpSync(DistCpOptions options, Configuration conf) {
-    this.inputOptions = options;
+  DistCpSync(DistCpContext context, Configuration conf) {
+    this.context = context;
     this.conf = conf;
+    this.copyFilter = CopyFilter.getCopyFilter(conf);
+    this.copyFilter.initialize();
   }
 
   private boolean isRdiff() {
-    return inputOptions.shouldUseRdiff();
+    return context.shouldUseRdiff();
   }
 
   /**
@@ -77,14 +80,14 @@ class DistCpSync {
    *  default distcp if the third condition isn't met.
    */
   private boolean preSyncCheck() throws IOException {
-    List<Path> sourcePaths = inputOptions.getSourcePaths();
+    List<Path> sourcePaths = context.getSourcePaths();
     if (sourcePaths.size() != 1) {
       // we only support one source dir which must be a snapshottable directory
       throw new IllegalArgumentException(sourcePaths.size()
           + " source paths are provided");
     }
     final Path sourceDir = sourcePaths.get(0);
-    final Path targetDir = inputOptions.getTargetPath();
+    final Path targetDir = context.getTargetPath();
 
     final FileSystem srcFs = sourceDir.getFileSystem(conf);
     final FileSystem tgtFs = targetDir.getFileSystem(conf);
@@ -104,13 +107,15 @@ class DistCpSync {
     // make sure targetFS has no change between from and the current states
     if (!checkNoChange(targetFs, targetDir)) {
       // set the source path using the snapshot path
-      inputOptions.setSourcePaths(Arrays.asList(getSnapshotPath(sourceDir,
-          inputOptions.getToSnapshot())));
+      context.setSourcePaths(Arrays.asList(getSnapshotPath(sourceDir,
+          context.getToSnapshot())));
       return false;
     }
 
-    final String from = getSnapshotName(inputOptions.getFromSnapshot());
-    final String to = getSnapshotName(inputOptions.getToSnapshot());
+    final String from = getSnapshotName(
+        context.getFromSnapshot());
+    final String to = getSnapshotName(
+        context.getToSnapshot());
 
     try {
       final FileStatus fromSnapshotStat =
@@ -152,9 +157,9 @@ class DistCpSync {
       return false;
     }
 
-    List<Path> sourcePaths = inputOptions.getSourcePaths();
+    List<Path> sourcePaths = context.getSourcePaths();
     final Path sourceDir = sourcePaths.get(0);
-    final Path targetDir = inputOptions.getTargetPath();
+    final Path targetDir = context.getTargetPath();
     final FileSystem tfs = targetDir.getFileSystem(conf);
     final DistributedFileSystem targetFs = (DistributedFileSystem) tfs;
 
@@ -175,8 +180,8 @@ class DistCpSync {
       deleteTargetTmpDir(targetFs, tmpDir);
       // TODO: since we have tmp directory, we can support "undo" with failures
       // set the source path using the snapshot path
-      inputOptions.setSourcePaths(Arrays.asList(getSnapshotPath(sourceDir,
-          inputOptions.getToSnapshot())));
+      context.setSourcePaths(Arrays.asList(getSnapshotPath(sourceDir,
+          context.getToSnapshot())));
     }
   }
 
@@ -187,13 +192,13 @@ class DistCpSync {
    */
   private boolean getAllDiffs() throws IOException {
     Path ssDir = isRdiff()?
-        inputOptions.getTargetPath() : inputOptions.getSourcePaths().get(0);
+        context.getTargetPath() : context.getSourcePaths().get(0);
 
     try {
       DistributedFileSystem fs =
           (DistributedFileSystem) ssDir.getFileSystem(conf);
-      final String from = getSnapshotName(inputOptions.getFromSnapshot());
-      final String to = getSnapshotName(inputOptions.getToSnapshot());
+      final String from = getSnapshotName(context.getFromSnapshot());
+      final String to = getSnapshotName(context.getToSnapshot());
       SnapshotDiffReport report = fs.getSnapshotDiffReport(ssDir,
           from, to);
       this.diffMap = new EnumMap<>(SnapshotDiffReport.DiffType.class);
@@ -211,18 +216,32 @@ class DistCpSync {
         }
         SnapshotDiffReport.DiffType dt = entry.getType();
         List<DiffInfo> list = diffMap.get(dt);
+        final Path source =
+                new Path(DFSUtilClient.bytes2String(entry.getSourcePath()));
+        final Path relativeSource = new Path(Path.SEPARATOR + source);
         if (dt == SnapshotDiffReport.DiffType.MODIFY ||
             dt == SnapshotDiffReport.DiffType.CREATE ||
             dt == SnapshotDiffReport.DiffType.DELETE) {
-          final Path source =
-              new Path(DFSUtilClient.bytes2String(entry.getSourcePath()));
-          list.add(new DiffInfo(source, null, dt));
+          if (copyFilter.shouldCopy(relativeSource)) {
+            list.add(new DiffInfo(source, null, dt));
+          }
         } else if (dt == SnapshotDiffReport.DiffType.RENAME) {
-          final Path source =
-              new Path(DFSUtilClient.bytes2String(entry.getSourcePath()));
           final Path target =
-              new Path(DFSUtilClient.bytes2String(entry.getTargetPath()));
-          list.add(new DiffInfo(source, target, dt));
+                  new Path(DFSUtilClient.bytes2String(entry.getTargetPath()));
+          final Path relativeTarget = new Path(Path.SEPARATOR + target);
+          if (copyFilter.shouldCopy(relativeSource)) {
+            if (copyFilter.shouldCopy(relativeTarget)) {
+              list.add(new DiffInfo(source, target, dt));
+            } else {
+              list = diffMap.get(SnapshotDiffReport.DiffType.DELETE);
+              list.add(new DiffInfo(source, target,
+                      SnapshotDiffReport.DiffType.DELETE));
+            }
+          } else if (copyFilter.shouldCopy(relativeTarget)) {
+            list = diffMap.get(SnapshotDiffReport.DiffType.CREATE);
+            list.add(new DiffInfo(target, null,
+                    SnapshotDiffReport.DiffType.CREATE));
+          }
         }
       }
       return true;
@@ -273,19 +292,19 @@ class DistCpSync {
    */
   private boolean checkNoChange(DistributedFileSystem fs, Path path) {
     try {
-      final String from = getSnapshotName(inputOptions.getFromSnapshot());
+      final String from = getSnapshotName(context.getFromSnapshot());
       SnapshotDiffReport targetDiff =
           fs.getSnapshotDiffReport(path, from, "");
       if (!targetDiff.getDiffList().isEmpty()) {
         DistCp.LOG.warn("The target has been modified since snapshot "
-            + inputOptions.getFromSnapshot());
+            + context.getFromSnapshot());
         return false;
       } else {
         return true;
       }
     } catch (IOException e) {
       DistCp.LOG.warn("Failed to compute snapshot diff on " + path
-          + " at snapshot " + inputOptions.getFromSnapshot(), e);
+          + " at snapshot " + context.getFromSnapshot(), e);
     }
     return false;
   }

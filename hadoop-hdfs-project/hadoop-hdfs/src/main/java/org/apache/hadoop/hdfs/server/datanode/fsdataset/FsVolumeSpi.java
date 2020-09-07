@@ -22,7 +22,7 @@ import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.channels.ClosedChannelException;
-import java.util.LinkedList;
+import java.util.Collection;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -32,8 +32,9 @@ import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.server.datanode.FileIoProvider;
+import org.apache.hadoop.hdfs.server.common.FileRegion;
 import org.apache.hadoop.hdfs.server.datanode.DirectoryScanner.ReportCompiler;
+import org.apache.hadoop.hdfs.server.datanode.FileIoProvider;
 import org.apache.hadoop.hdfs.server.datanode.StorageLocation;
 import org.apache.hadoop.hdfs.server.datanode.checker.Checkable;
 import org.apache.hadoop.hdfs.server.datanode.checker.VolumeCheckResult;
@@ -97,17 +98,17 @@ public interface FsVolumeSpi
 
   /**
    * BlockIterator will return ExtendedBlock entries from a block pool in
-   * this volume.  The entries will be returned in sorted order.<p/>
+   * this volume.  The entries will be returned in sorted order.<p>
    *
    * BlockIterator objects themselves do not always have internal
    * synchronization, so they can only safely be used by a single thread at a
-   * time.<p/>
+   * time.<p>
    *
    * Closing the iterator does not save it.  You must call save to save it.
    */
   interface BlockIterator extends Closeable {
     /**
-     * Get the next block.<p/>
+     * Get the next block.<p>
      *
      * Note that this block may be removed in between the time we list it,
      * and the time the caller tries to use it, or it may represent a stale
@@ -145,7 +146,7 @@ public interface FsVolumeSpi
     void save() throws IOException;
 
     /**
-     * Set the maximum staleness of entries that we will return.<p/>
+     * Set the maximum staleness of entries that we will return.<p>
      *
      * A maximum staleness of 0 means we will never return stale entries; a
      * larger value will allow us to reduce resource consumption in exchange
@@ -210,12 +211,12 @@ public interface FsVolumeSpi
    * Because millions of these structures may be created, we try to save
    * memory here.  So instead of storing full paths, we store path suffixes.
    * The block file, if it exists, will have a path like this:
-   * <volume_base_path>/<block_path>
+   * {@literal <volume_base_path>/<block_path>}
    * So we don't need to store the volume path, since we already know what the
    * volume is.
    *
    * The metadata file, if it exists, will have a path like this:
-   * <volume_base_path>/<block_path>_<genstamp>.meta
+   * {@literal <volume_base_path>/<block_path>_<genstamp>.meta}
    * So if we have a block file, there isn't any need to store the block path
    * again.
    *
@@ -241,10 +242,11 @@ public interface FsVolumeSpi
 
     private final FsVolumeSpi volume;
 
+    private final FileRegion fileRegion;
     /**
      * Get the file's length in async block scan
      */
-    private final long blockFileLength;
+    private final long blockLength;
 
     private final static Pattern CONDENSED_PATH_REGEX =
         Pattern.compile("(?<!^)(\\\\|/){2,}");
@@ -297,10 +299,10 @@ public interface FsVolumeSpi
       this.blockId = blockId;
       String condensedVolPath =
           (vol == null || vol.getBaseURI() == null) ? null :
-            getCondensedPath(new File(vol.getBaseURI()).getAbsolutePath());
+              getCondensedPath(new File(vol.getBaseURI()).getAbsolutePath());
       this.blockSuffix = blockFile == null ? null :
-        getSuffix(blockFile, condensedVolPath);
-      this.blockFileLength = (blockFile != null) ? blockFile.length() : 0;
+              getSuffix(blockFile, condensedVolPath);
+      this.blockLength = (blockFile != null) ? blockFile.length() : 0;
       if (metaFile == null) {
         this.metaSuffix = null;
       } else if (blockFile == null) {
@@ -310,6 +312,26 @@ public interface FsVolumeSpi
             condensedVolPath + blockSuffix);
       }
       this.volume = vol;
+      this.fileRegion = null;
+    }
+
+    /**
+     * Create a ScanInfo object for a block. This constructor will examine
+     * the block data and meta-data files.
+     *
+     * @param blockId the block ID
+     * @param vol the volume that contains the block
+     * @param fileRegion the file region (for provided blocks)
+     * @param length the length of the block data
+     */
+    public ScanInfo(long blockId, FsVolumeSpi vol, FileRegion fileRegion,
+        long length) {
+      this.blockId = blockId;
+      this.blockLength = length;
+      this.volume = vol;
+      this.fileRegion = fileRegion;
+      this.blockSuffix = null;
+      this.metaSuffix = null;
     }
 
     /**
@@ -328,8 +350,8 @@ public interface FsVolumeSpi
      *
      * @return the length of the data block
      */
-    public long getBlockFileLength() {
-      return blockFileLength;
+    public long getBlockLength() {
+      return blockLength;
     }
 
     /**
@@ -340,13 +362,13 @@ public interface FsVolumeSpi
     public File getMetaFile() {
       if (metaSuffix == null) {
         return null;
-      } else if (blockSuffix == null) {
-        return new File(new File(volume.getBaseURI()).getAbsolutePath(),
-            metaSuffix);
-      } else {
-        return new File(new File(volume.getBaseURI()).getAbsolutePath(),
-            blockSuffix + metaSuffix);
       }
+      String fileSuffix = metaSuffix;
+      if (blockSuffix != null) {
+        fileSuffix = blockSuffix + metaSuffix;
+      }
+      return new File(new File(volume.getBaseURI()).getAbsolutePath(),
+          fileSuffix);
     }
 
     /**
@@ -367,18 +389,12 @@ public interface FsVolumeSpi
       return volume;
     }
 
-    @Override // Comparable
+    @Override
     public int compareTo(ScanInfo b) {
-      if (blockId < b.blockId) {
-        return -1;
-      } else if (blockId == b.blockId) {
-        return 0;
-      } else {
-        return 1;
-      }
+      return Long.compare(this.blockId, b.blockId);
     }
 
-    @Override // Object
+    @Override
     public boolean equals(Object o) {
       if (this == o) {
         return true;
@@ -389,15 +405,19 @@ public interface FsVolumeSpi
       return blockId == ((ScanInfo) o).blockId;
     }
 
-    @Override // Object
+    @Override
     public int hashCode() {
-      return (int)(blockId^(blockId>>>32));
+      return Long.hashCode(this.blockId);
     }
 
     public long getGenStamp() {
       return metaSuffix != null ? Block.getGenerationStamp(
           getMetaFile().getName()) :
             HdfsConstants.GRANDFATHER_GENERATION_STAMP;
+    }
+
+    public FileRegion getFileRegion() {
+      return fileRegion;
     }
   }
 
@@ -419,10 +439,11 @@ public interface FsVolumeSpi
    * @param bpid block pool id to scan
    * @param report the list onto which blocks reports are placed
    * @param reportCompiler
+   * @throws InterruptedException
    * @throws IOException
    */
-  LinkedList<ScanInfo> compileReport(String bpid,
-      LinkedList<ScanInfo> report, ReportCompiler reportCompiler)
+  void compileReport(String bpid,
+      Collection<ScanInfo> report, ReportCompiler reportCompiler)
       throws InterruptedException, IOException;
 
   /**

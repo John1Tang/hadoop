@@ -18,9 +18,9 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.protobuf.InvalidProtocolBufferException;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.thirdparty.protobuf.InvalidProtocolBufferException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -31,6 +31,7 @@ import org.apache.hadoop.ha.ServiceFailedException;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ZKUtil;
+import org.apache.hadoop.util.curator.ZKCuratorManager;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
@@ -51,13 +52,13 @@ import java.util.TimerTask;
 public class ActiveStandbyElectorBasedElectorService extends AbstractService
     implements EmbeddedElector,
     ActiveStandbyElector.ActiveStandbyElectorCallback {
-  private static final Log LOG = LogFactory.getLog(
-      ActiveStandbyElectorBasedElectorService.class.getName());
+  private static final Logger LOG = LoggerFactory.
+      getLogger(ActiveStandbyElectorBasedElectorService.class.getName());
   private static final HAServiceProtocol.StateChangeRequestInfo req =
       new HAServiceProtocol.StateChangeRequestInfo(
           HAServiceProtocol.RequestSource.REQUEST_BY_ZKFC);
 
-  private RMContext rmContext;
+  private ResourceManager rm;
 
   private byte[] localActiveNodeInfo;
   private ActiveStandbyElector elector;
@@ -66,9 +67,9 @@ public class ActiveStandbyElectorBasedElectorService extends AbstractService
   @VisibleForTesting
   final Object zkDisconnectLock = new Object();
 
-  ActiveStandbyElectorBasedElectorService(RMContext rmContext) {
+  ActiveStandbyElectorBasedElectorService(ResourceManager rm) {
     super(ActiveStandbyElectorBasedElectorService.class.getName());
-    this.rmContext = rmContext;
+    this.rm = rm;
   }
 
   @Override
@@ -96,8 +97,8 @@ public class ActiveStandbyElectorBasedElectorService extends AbstractService
     zkSessionTimeout = conf.getLong(YarnConfiguration.RM_ZK_TIMEOUT_MS,
         YarnConfiguration.DEFAULT_RM_ZK_TIMEOUT_MS);
 
-    List<ACL> zkAcls = RMZKUtils.getZKAcls(conf);
-    List<ZKUtil.ZKAuthInfo> zkAuths = RMZKUtils.getZKAuths(conf);
+    List<ACL> zkAcls = ZKCuratorManager.getZKAcls(conf);
+    List<ZKUtil.ZKAuthInfo> zkAuths = ZKCuratorManager.getZKAuths(conf);
 
     int maxRetryNum =
         conf.getInt(YarnConfiguration.RM_HA_FC_ELECTOR_ZK_RETRIES_KEY, conf
@@ -108,8 +109,9 @@ public class ActiveStandbyElectorBasedElectorService extends AbstractService
 
     elector.ensureParentZNode();
     if (!isParentZnodeSafe(clusterId)) {
-      notifyFatalError(electionZNode + " znode has invalid data! "+
-          "Might need formatting!");
+      notifyFatalError(String.format("invalid data in znode, %s, " +
+          "which may require the state store to be reformatted",
+          electionZNode));
     }
 
     super.serviceInit(conf);
@@ -139,7 +141,7 @@ public class ActiveStandbyElectorBasedElectorService extends AbstractService
     cancelDisconnectTimer();
 
     try {
-      rmContext.getRMAdminService().transitionToActive(req);
+      rm.getRMContext().getRMAdminService().transitionToActive(req);
     } catch (Exception e) {
       throw new ServiceFailedException("RM could not transition to Active", e);
     }
@@ -150,7 +152,7 @@ public class ActiveStandbyElectorBasedElectorService extends AbstractService
     cancelDisconnectTimer();
 
     try {
-      rmContext.getRMAdminService().transitionToStandby(req);
+      rm.getRMContext().getRMAdminService().transitionToStandby(req);
     } catch (Exception e) {
       LOG.error("RM could not transition to Standby", e);
     }
@@ -204,17 +206,15 @@ public class ActiveStandbyElectorBasedElectorService extends AbstractService
   @SuppressWarnings(value = "unchecked")
   @Override
   public void notifyFatalError(String errorMessage) {
-    rmContext.getDispatcher().getEventHandler().handle(
+    rm.getRMContext().getDispatcher().getEventHandler().handle(
         new RMFatalEvent(RMFatalEventType.EMBEDDED_ELECTOR_FAILED,
             errorMessage));
   }
 
   @Override
   public void fenceOldActive(byte[] oldActiveData) {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Request to fence old active being ignored, " +
-          "as embedded leader election doesn't support fencing");
-    }
+    LOG.debug("Request to fence old active being ignored, " +
+        "as embedded leader election doesn't support fencing");
   }
 
   private static byte[] createActiveNodeInfo(String clusterId, String rmId)

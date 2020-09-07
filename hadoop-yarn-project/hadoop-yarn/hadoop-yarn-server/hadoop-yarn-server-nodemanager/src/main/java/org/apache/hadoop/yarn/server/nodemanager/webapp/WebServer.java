@@ -19,9 +19,9 @@
 package org.apache.hadoop.yarn.server.nodemanager.webapp;
 
 import static org.apache.hadoop.yarn.util.StringHelper.pajoin;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.AuthenticationFilterInitializer;
 import org.apache.hadoop.security.HttpCrossOriginFilterInitializer;
@@ -41,11 +41,14 @@ import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 
 import com.sun.jersey.guice.spi.container.servlet.GuiceContainer;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class WebServer extends AbstractService {
 
-  private static final Log LOG = LogFactory.getLog(WebServer.class);
+  private static final Logger LOG =
+       LoggerFactory.getLogger(WebServer.class);
 
   private final Context nmContext;
   private final NMWebApp nmWebApp;
@@ -63,6 +66,12 @@ public class WebServer extends AbstractService {
   @Override
   protected void serviceStart() throws Exception {
     Configuration conf = getConfig();
+    Map<String, String> params = new HashMap<String, String>();
+    Map<String, String> terminalParams = new HashMap<String, String>();
+    terminalParams.put("resourceBase", WebServer.class
+        .getClassLoader().getResource("TERMINAL").toExternalForm());
+    terminalParams.put("dirAllowed", "false");
+    terminalParams.put("pathInfoOnly", "true");
     String bindAddress = WebAppUtils.getWebAppBindURL(conf,
                           YarnConfiguration.NM_BIND_HOST,
                           WebAppUtils.getNMWebAppURLWithoutScheme(conf));
@@ -95,12 +104,17 @@ public class WebServer extends AbstractService {
       targets.add(AuthenticationFilterInitializer.class.getName());
       conf.set(filterInitializerConfKey, StringUtils.join(",", targets));
     }
+    ContainerShellWebSocket.init(nmContext);
     LOG.info("Instantiating NMWebApp at " + bindAddress);
     try {
       this.webApp =
           WebApps
             .$for("node", Context.class, this.nmContext, "ws")
             .at(bindAddress)
+            .withServlet("ContainerShellWebSocket", "/container/*",
+                ContainerShellWebSocketServlet.class, params, false)
+            .withServlet("Terminal", "/terminal/*",
+                TerminalServlet.class, terminalParams, false)
             .with(conf)
             .withHttpSpnegoPrincipalKey(
               YarnConfiguration.NM_WEBAPP_SPNEGO_USER_NAME_KEY)

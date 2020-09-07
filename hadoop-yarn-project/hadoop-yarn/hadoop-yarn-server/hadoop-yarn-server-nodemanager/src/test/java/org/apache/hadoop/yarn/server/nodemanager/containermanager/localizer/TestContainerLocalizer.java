@@ -20,13 +20,13 @@ package org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer;
 import static junit.framework.TestCase.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Matchers.argThat;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Matchers.isA;
-import static org.mockito.Matchers.same;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isA;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -38,6 +38,11 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
@@ -50,11 +55,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.base.Supplier;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.AbstractFileSystem;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.Path;
@@ -66,12 +70,14 @@ import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.LocalResourceType;
 import org.apache.hadoop.yarn.api.records.LocalResourceVisibility;
 import org.apache.hadoop.yarn.api.records.URL;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
@@ -80,7 +86,7 @@ import org.apache.hadoop.yarn.server.nodemanager.api.ResourceLocalizationSpec;
 import org.apache.hadoop.yarn.server.nodemanager.api.protocolrecords.LocalResourceStatus;
 import org.apache.hadoop.yarn.server.nodemanager.api.protocolrecords.LocalizerAction;
 import org.apache.hadoop.yarn.server.nodemanager.api.protocolrecords.LocalizerStatus;
-import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.ArgumentMatcher;
@@ -88,12 +94,16 @@ import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
+import java.util.function.Supplier;
+
 public class TestContainerLocalizer {
 
-  static final Log LOG = LogFactory.getLog(TestContainerLocalizer.class);
+  static final Logger LOG =
+       LoggerFactory.getLogger(TestContainerLocalizer.class);
   static final Path basedir =
       new Path("target", TestContainerLocalizer.class.getName());
   static final FsPermission CACHE_DIR_PERM = new FsPermission((short)0710);
+  static final FsPermission USERCACHE_DIR_PERM = new FsPermission((short) 0755);
 
   static final String appUser = "yak";
   static final String appId = "app_RM_0";
@@ -101,6 +111,10 @@ public class TestContainerLocalizer {
   static final InetSocketAddress nmAddr =
       new InetSocketAddress("foobar", 8040);
 
+  @After
+  public void cleanUp() throws IOException {
+    FileUtils.deleteDirectory(new File(basedir.toUri().getRawPath()));
+  }
 
   @Test
   public void testMain() throws Exception {
@@ -200,13 +214,7 @@ public class TestContainerLocalizer {
 
     // verify all HB use localizerID provided
     verify(nmProxy, never()).heartbeat(argThat(
-        new ArgumentMatcher<LocalizerStatus>() {
-          @Override
-          public boolean matches(Object o) {
-            LocalizerStatus status = (LocalizerStatus) o;
-            return !containerId.equals(status.getLocalizerId());
-          }
-        }));
+        status -> !containerId.equals(status.getLocalizerId())));
   }
 
   @Test(timeout = 15000)
@@ -226,6 +234,33 @@ public class TestContainerLocalizer {
       Assert.fail("Localization succeeded unexpectedly!");
     } catch (IOException e) {
       Assert.assertTrue(e.getMessage().contains("Sigh, no token!"));
+    }
+  }
+
+  @Test
+  public void testDiskCheckFailure() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(YarnConfiguration.DISK_VALIDATOR, "read-write");
+    FileContext lfs = FileContext.getLocalFSFileContext(conf);
+    Path fileCacheDir = lfs.makeQualified(new Path(basedir, "filecache"));
+    lfs.mkdir(fileCacheDir, FsPermission.getDefault(), true);
+    RecordFactory recordFactory = mock(RecordFactory.class);
+    ContainerLocalizer localizer = new ContainerLocalizer(lfs,
+        UserGroupInformation.getCurrentUser().getUserName(), "application_01",
+        "container_01", String.format(ContainerExecutor.TOKEN_FILE_NAME_FMT,
+        "container_01"), new ArrayList<>(), recordFactory){
+      @Override
+      Configuration initConfiguration() {
+        return conf;
+      }
+    };
+    LocalResource rsrc = mock(LocalResource.class);
+    Path destDirPath = new Path(fileCacheDir, "11");
+    try {
+      localizer.download(destDirPath, rsrc,
+          UserGroupInformation.getCurrentUser());
+    } catch (DiskErrorException ex) {
+      fail(ex.getCause().toString());
     }
   }
 
@@ -290,7 +325,7 @@ public class TestContainerLocalizer {
         try {
           localizerA.runLocalization(nmAddr);
         } catch (Exception e) {
-          LOG.warn(e);
+          LOG.warn(e.toString());
         }
       }
     };
@@ -300,7 +335,7 @@ public class TestContainerLocalizer {
         try {
           localizerB.runLocalization(nmAddr);
         } catch (Exception e) {
-          LOG.warn(e);
+          LOG.warn(e.toString());
         }
       }
     };
@@ -390,14 +425,13 @@ public class TestContainerLocalizer {
     doReturn(cs).when(localizer).createCompletionService(syncExec);
   }
 
-  static class HBMatches extends ArgumentMatcher<LocalizerStatus> {
+  static class HBMatches implements ArgumentMatcher<LocalizerStatus> {
     final LocalResource rsrc;
     HBMatches(LocalResource rsrc) {
       this.rsrc = rsrc;
     }
     @Override
-    public boolean matches(Object o) {
-      LocalizerStatus status = (LocalizerStatus) o;
+    public boolean matches(LocalizerStatus status) {
       for (LocalResourceStatus localized : status.getResources()) {
         switch (localized.getStatus()) {
         case FETCH_SUCCESS:
@@ -437,7 +471,9 @@ public class TestContainerLocalizer {
     FakeContainerLocalizer(FileContext lfs, String user, String appId,
         String localizerId, List<Path> localDirs,
         RecordFactory recordFactory) throws IOException {
-      super(lfs, user, appId, localizerId, localDirs, recordFactory);
+      super(lfs, user, appId, localizerId,
+          String.format(ContainerExecutor.TOKEN_FILE_NAME_FMT, containerId),
+          localDirs, recordFactory);
     }
 
     FakeLongDownload getDownloader() {
@@ -513,7 +549,7 @@ public class TestContainerLocalizer {
       DataInputBuffer appTokens = createFakeCredentials(random, 10);
       tokenPath =
         lfs.makeQualified(new Path(
-              String.format(ContainerLocalizer.TOKEN_FILE_NAME_FMT,
+            String.format(ContainerExecutor.TOKEN_FILE_NAME_FMT,
                   containerId)));
       doReturn(new FSDataInputStream(new FakeFSDataInputStream(appTokens))
           ).when(spylfs).open(tokenPath);
@@ -633,6 +669,37 @@ static DataInputBuffer createFakeCredentials(Random r, int nTok)
     DataInputBuffer ret = new DataInputBuffer();
     ret.reset(buf.getData(), 0, buf.getLength());
     return ret;
+  }
+
+  @Test(timeout = 10000)
+  public void testUserCacheDirPermission() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(CommonConfigurationKeys.FS_PERMISSIONS_UMASK_KEY, "077");
+    FileContext lfs = FileContext.getLocalFSFileContext(conf);
+    Path fileCacheDir = lfs.makeQualified(new Path(basedir, "filecache"));
+    lfs.mkdir(fileCacheDir, FsPermission.getDefault(), true);
+    RecordFactory recordFactory = mock(RecordFactory.class);
+    ContainerLocalizer localizer = new ContainerLocalizer(lfs,
+        UserGroupInformation.getCurrentUser().getUserName(), "application_01",
+        "container_01", String.format(ContainerExecutor.TOKEN_FILE_NAME_FMT,
+        "container_01"), new ArrayList<>(), recordFactory);
+    LocalResource rsrc = mock(LocalResource.class);
+    when(rsrc.getVisibility()).thenReturn(LocalResourceVisibility.PRIVATE);
+    Path destDirPath = new Path(fileCacheDir, "0/0/85");
+    //create one of the parent directories with the wrong permissions first
+    FsPermission wrongPerm = new FsPermission((short) 0700);
+    lfs.mkdir(destDirPath.getParent().getParent(), wrongPerm, false);
+    lfs.mkdir(destDirPath.getParent(), wrongPerm, false);
+    //Localize and check the directory permission are correct.
+    localizer
+        .download(destDirPath, rsrc, UserGroupInformation.getCurrentUser());
+    Assert
+        .assertEquals("Cache directory permissions filecache/0/0 is incorrect",
+            USERCACHE_DIR_PERM,
+            lfs.getFileStatus(destDirPath.getParent()).getPermission());
+    Assert.assertEquals("Cache directory permissions filecache/0 is incorrect",
+        USERCACHE_DIR_PERM,
+        lfs.getFileStatus(destDirPath.getParent().getParent()).getPermission());
   }
 
 }

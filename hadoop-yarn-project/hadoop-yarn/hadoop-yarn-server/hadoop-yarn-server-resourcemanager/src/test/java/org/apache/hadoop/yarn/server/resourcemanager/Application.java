@@ -30,8 +30,8 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.yarn.api.protocolrecords.GetNewApplicationRequest;
@@ -74,7 +74,8 @@ import org.apache.hadoop.yarn.util.resource.Resources;
 
 @Private
 public class Application {
-  private static final Log LOG = LogFactory.getLog(Application.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(Application.class);
   
   private AtomicInteger taskCounter = new AtomicInteger(0);
 
@@ -222,10 +223,8 @@ public class Application {
     if (requests == null) {
       requests = new HashMap<String, ResourceRequest>();
       this.requests.put(schedulerKey, requests);
-      if(LOG.isDebugEnabled()) {
-        LOG.debug("Added priority=" + schedulerKey.getPriority()
-            + " application="+ applicationId);
-      }
+      LOG.debug("Added priority={} application={}", schedulerKey.getPriority(),
+          applicationId);
     }
     
     final Resource capability = requestSpec.get(schedulerKey);
@@ -241,10 +240,7 @@ public class Application {
     LOG.info("Added task " + task.getTaskId() + " to application " + 
         applicationId + " at priority " + schedulerKey.getPriority());
     
-    if(LOG.isDebugEnabled()) {
-      LOG.debug("addTask: application=" + applicationId
-        + " #asks=" + ask.size());
-    }
+    LOG.debug("addTask: application={} #asks={}", applicationId, ask.size());
     
     // Create resource requests
     for (String host : task.getHosts()) {
@@ -305,9 +301,8 @@ public class Application {
     
     // Note this down for next interaction with ResourceManager
     ask.remove(request);
-    ask.add(
-        org.apache.hadoop.yarn.server.utils.BuilderUtils.newResourceRequest(
-            request)); // clone to ensure the RM doesn't manipulate the same obj
+    // clone to ensure the RM doesn't manipulate the same obj
+    ask.add(ResourceRequest.clone(request));
 
     if (LOG.isDebugEnabled()) {
       LOG.debug("addResourceRequest: applicationId=" + applicationId.getId()
@@ -320,19 +315,18 @@ public class Application {
   
   public synchronized List<Container> getResources() throws IOException {
     if(LOG.isDebugEnabled()) {
-      LOG.debug("getResources begin:" + " application=" + applicationId
-        + " #ask=" + ask.size());
+      LOG.debug("getResources begin: application={} #ask={}",
+          applicationId, ask.size());
 
       for (ResourceRequest request : ask) {
-        LOG.debug("getResources:" + " application=" + applicationId
-          + " ask-request=" + request);
+        LOG.debug("getResources: application={} ask-request={}",
+            applicationId, request);
       }
     }
     
     // Get resources from the ResourceManager
     Allocation allocation = resourceManager.getResourceScheduler().allocate(
-        applicationAttemptId, new ArrayList<ResourceRequest>(ask),
-        new ArrayList<ContainerId>(), null, null,
+        applicationAttemptId, new ArrayList<ResourceRequest>(ask), null, new ArrayList<ContainerId>(), null, null,
         new ContainerUpdates());
 
     if (LOG.isInfoEnabled()) {
@@ -347,8 +341,8 @@ public class Application {
     ask.clear();
     
     if(LOG.isDebugEnabled()) {
-      LOG.debug("getResources() for " + applicationId + ":"
-        + " ask=" + ask.size() + " recieved=" + containers.size());
+      LOG.debug("getResources() for {}: ask={} received={}",
+          applicationId, ask.size(), containers.size());
     }
     
     return containers;
@@ -431,7 +425,7 @@ public class Application {
     if (type == NodeType.NODE_LOCAL) {
       for (String host : task.getHosts()) {
         if(LOG.isDebugEnabled()) {
-          LOG.debug("updateResourceRequests:" + " application=" + applicationId
+          LOG.debug("updateResourceDemands:" + " application=" + applicationId
             + " type=" + type + " host=" + host
             + " request=" + ((requests == null) ? "null" : requests.get(host)));
         }
@@ -442,7 +436,7 @@ public class Application {
     if (type == NodeType.NODE_LOCAL || type == NodeType.RACK_LOCAL) {
       for (String rack : task.getRacks()) {
         if(LOG.isDebugEnabled()) {
-          LOG.debug("updateResourceRequests:" + " application=" + applicationId
+          LOG.debug("updateResourceDemands:" + " application=" + applicationId
             + " type=" + type + " rack=" + rack
             + " request=" + ((requests == null) ? "null" : requests.get(rack)));
         }
@@ -452,10 +446,8 @@ public class Application {
     
     updateResourceRequest(requests.get(ResourceRequest.ANY));
     
-    if(LOG.isDebugEnabled()) {
-      LOG.debug("updateResourceRequests:" + " application=" + applicationId
-        + " #asks=" + ask.size());
-    }
+    LOG.debug("updateResourceDemands: application={} #asks={}",
+        applicationId, ask.size());
   }
   
   private void updateResourceRequest(ResourceRequest request) {
@@ -463,14 +455,11 @@ public class Application {
 
     // Note this for next interaction with ResourceManager
     ask.remove(request);
-    ask.add(
-        org.apache.hadoop.yarn.server.utils.BuilderUtils.newResourceRequest(
-        request)); // clone to ensure the RM doesn't manipulate the same obj
+    // clone to ensure the RM doesn't manipulate the same obj
+    ask.add(ResourceRequest.clone(request));
 
-    if(LOG.isDebugEnabled()) {
-      LOG.debug("updateResourceRequest:" + " application=" + applicationId
-        + " request=" + request);
-    }
+    LOG.debug("updateResourceRequest: application={} request={}",
+        applicationId, request);
   }
 
   private ContainerLaunchContext createCLC() {

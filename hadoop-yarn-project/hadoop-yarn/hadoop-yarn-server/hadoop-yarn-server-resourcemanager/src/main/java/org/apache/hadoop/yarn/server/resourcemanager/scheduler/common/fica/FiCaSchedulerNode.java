@@ -18,8 +18,8 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
@@ -40,7 +40,8 @@ import java.util.Set;
 
 public class FiCaSchedulerNode extends SchedulerNode {
 
-  private static final Log LOG = LogFactory.getLog(FiCaSchedulerNode.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(FiCaSchedulerNode.class);
   private Map<ContainerId, RMContainer> killableContainers = new HashMap<>();
   private Resource totalKillableResources = Resource.newInstance(0, 0);
   
@@ -160,4 +161,17 @@ public class FiCaSchedulerNode extends SchedulerNode {
   public synchronized Map<ContainerId, RMContainer> getKillableContainers() {
     return Collections.unmodifiableMap(killableContainers);
   }
+
+  protected synchronized void allocateContainer(RMContainer rmContainer,
+      boolean launchedOnNode) {
+    super.allocateContainer(rmContainer, launchedOnNode);
+
+    final Container container = rmContainer.getContainer();
+    LOG.info("Assigned container " + container.getId() + " of capacity "
+          + container.getResource() + " on host " + getRMNode().getNodeAddress()
+          + ", which has " + getNumContainers() + " containers, "
+          + getAllocatedResource() + " used and " + getUnallocatedResource()
+          + " available after allocation");
+  }
+
 }

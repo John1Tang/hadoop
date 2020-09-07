@@ -22,8 +22,8 @@ import java.net.SocketException;
 
 import org.apache.commons.daemon.Daemon;
 import org.apache.commons.daemon.DaemonContext;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hdfs.nfs.conf.NfsConfigKeys;
 import org.apache.hadoop.hdfs.nfs.conf.NfsConfiguration;
 
@@ -37,9 +37,11 @@ import org.apache.hadoop.hdfs.nfs.conf.NfsConfiguration;
  * Debian: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=594880
  */
 public class PrivilegedNfsGatewayStarter implements Daemon {
-  static final Log LOG = LogFactory.getLog(PrivilegedNfsGatewayStarter.class);
+  static final Logger LOG =
+      LoggerFactory.getLogger(PrivilegedNfsGatewayStarter.class);
   private String[] args = null;
   private DatagramSocket registrationSocket = null;
+  private Nfs3 nfs3Server = null;
 
   @Override
   public void init(DaemonContext context) throws Exception {
@@ -68,12 +70,14 @@ public class PrivilegedNfsGatewayStarter implements Daemon {
 
   @Override
   public void start() throws Exception {
-    Nfs3.startService(args, registrationSocket);
+    nfs3Server = Nfs3.startService(args, registrationSocket);
   }
 
   @Override
   public void stop() throws Exception {
-    // Nothing to do.
+    if (nfs3Server != null) {
+      nfs3Server.stop();
+    }
   }
 
   @Override

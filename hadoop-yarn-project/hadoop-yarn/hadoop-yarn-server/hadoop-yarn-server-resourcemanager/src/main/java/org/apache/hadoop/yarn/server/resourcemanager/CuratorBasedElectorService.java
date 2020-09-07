@@ -19,8 +19,8 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.recipes.leader.LeaderLatch;
 import org.apache.curator.framework.recipes.leader.LeaderLatchListener;
@@ -41,18 +41,16 @@ import java.io.IOException;
 @InterfaceStability.Unstable
 public class CuratorBasedElectorService extends AbstractService
     implements EmbeddedElector, LeaderLatchListener {
-  public static final Log LOG =
-      LogFactory.getLog(CuratorBasedElectorService.class);
+  public static final Logger LOG =
+      LoggerFactory.getLogger(CuratorBasedElectorService.class);
   private LeaderLatch leaderLatch;
   private CuratorFramework curator;
-  private RMContext rmContext;
   private String latchPath;
   private String rmId;
   private ResourceManager rm;
 
-  public CuratorBasedElectorService(RMContext rmContext, ResourceManager rm) {
+  public CuratorBasedElectorService(ResourceManager rm) {
     super(CuratorBasedElectorService.class.getName());
-    this.rmContext = rmContext;
     this.rm = rm;
   }
 
@@ -102,7 +100,8 @@ public class CuratorBasedElectorService extends AbstractService
   public void isLeader() {
     LOG.info(rmId + "is elected leader, transitioning to active");
     try {
-      rmContext.getRMAdminService().transitionToActive(
+      rm.getRMContext().getRMAdminService()
+          .transitionToActive(
           new HAServiceProtocol.StateChangeRequestInfo(
               HAServiceProtocol.RequestSource.REQUEST_BY_ZKFC));
     } catch (Exception e) {
@@ -123,7 +122,8 @@ public class CuratorBasedElectorService extends AbstractService
   public void notLeader() {
     LOG.info(rmId + " relinquish leadership");
     try {
-      rmContext.getRMAdminService().transitionToStandby(
+      rm.getRMContext().getRMAdminService()
+          .transitionToStandby(
           new HAServiceProtocol.StateChangeRequestInfo(
               HAServiceProtocol.RequestSource.REQUEST_BY_ZKFC));
     } catch (Exception e) {

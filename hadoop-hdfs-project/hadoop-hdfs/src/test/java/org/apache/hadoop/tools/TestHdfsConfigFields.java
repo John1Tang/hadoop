@@ -41,8 +41,10 @@ public class TestHdfsConfigFields extends TestConfigurationFieldsBase {
   public void initializeMemberVariables() {
     xmlFilename = new String("hdfs-default.xml");
     configurationClasses = new Class[] { HdfsClientConfigKeys.class,
-        HdfsClientConfigKeys.StripedRead.class,
-        DFSConfigKeys.class};
+        HdfsClientConfigKeys.Failover.class,
+        HdfsClientConfigKeys.StripedRead.class, DFSConfigKeys.class,
+        HdfsClientConfigKeys.BlockWrite.class,
+        HdfsClientConfigKeys.BlockWrite.ReplaceDatanodeOnFailure.class };
 
     // Set error modes
     errorIfMissingConfigProps = true;
@@ -66,10 +68,6 @@ public class TestHdfsConfigFields extends TestConfigurationFieldsBase {
     // Purposely hidden, based on comments in DFSConfigKeys
     configurationPropsToSkipCompare
         .add(DFSConfigKeys.DFS_DATANODE_XCEIVER_STOP_TIMEOUT_MILLIS_KEY);
-    configurationPropsToSkipCompare
-        .add(DFSConfigKeys.DFS_METRICS_ROLLING_AVERAGES_WINDOW_LENGTH_KEY);
-    configurationPropsToSkipCompare
-        .add(DFSConfigKeys.DFS_METRICS_ROLLING_AVERAGE_NUM_WINDOWS_KEY);
 
     // Fully deprecated properties?
     configurationPropsToSkipCompare
@@ -105,8 +103,6 @@ public class TestHdfsConfigFields extends TestConfigurationFieldsBase {
         .add(DFSConfigKeys.DFS_NAMENODE_STARTUP_KEY);
     configurationPropsToSkipCompare.add(DFSConfigKeys
         .DFS_DATANODE_ENABLE_FILEIO_FAULT_INJECTION_KEY);
-    configurationPropsToSkipCompare.add(DFSConfigKeys
-        .DFS_DATANODE_FILEIO_PROFILING_SAMPLING_FRACTION_KEY);
 
     // Allocate
     xmlPropsToSkipCompare = new HashSet<String>();
@@ -124,9 +120,6 @@ public class TestHdfsConfigFields extends TestConfigurationFieldsBase {
 
     // Used oddly by DataNode to create new config String
     xmlPropsToSkipCompare.add("hadoop.hdfs.configuration.version");
-
-    // Skip comparing in branch-2.  Removed in trunk with HDFS-7985.
-    xmlPropsToSkipCompare.add("dfs.webhdfs.enabled");
 
     // Some properties have moved to HdfsClientConfigKeys
     xmlPropsToSkipCompare.add("dfs.client.short.circuit.replica.stale.threshold.ms");

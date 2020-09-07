@@ -19,9 +19,9 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
 import static org.junit.Assert.assertEquals;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -29,15 +29,11 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import java.util.HashMap;
-import java.util.Map;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
@@ -55,7 +51,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceLimits;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.preemption.PreemptionManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.placement.PlacementSet;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.placement.CandidateNodeSet;
 
 import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
@@ -71,7 +67,8 @@ import org.mockito.stubbing.Answer;
 
 public class TestChildQueueOrder {
 
-  private static final Log LOG = LogFactory.getLog(TestChildQueueOrder.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestChildQueueOrder.class);
 
   RMContext rmContext;
   YarnConfiguration conf;
@@ -131,7 +128,7 @@ public class TestChildQueueOrder {
         try {
           throw new Exception();
         } catch (Exception e) {
-          LOG.info("FOOBAR q.assignContainers q=" + queue.getQueueName() + 
+          LOG.info("FOOBAR q.assignContainers q=" + queue.getQueuePath() +
               " alloc=" + allocation + " node=" + node.getNodeName());
         }
         final Resource allocatedResource = Resources.createResource(allocation);
@@ -147,9 +144,9 @@ public class TestChildQueueOrder {
         // Next call - nothing
         if (allocation > 0) {
           doReturn(new CSAssignment(Resources.none(), type)).
-          when(queue)
-              .assignContainers(eq(clusterResource), any(PlacementSet.class),
-                  any(ResourceLimits.class), any(SchedulingMode.class));
+              when(queue).assignContainers(eq(clusterResource),
+              any(CandidateNodeSet.class), any(ResourceLimits.class),
+              any(SchedulingMode.class));
 
           // Mock the node's resource availability
           Resource available = node.getUnallocatedResource();
@@ -159,9 +156,9 @@ public class TestChildQueueOrder {
 
         return new CSAssignment(allocatedResource, type);
       }
-    }).
-    when(queue).assignContainers(eq(clusterResource), any(PlacementSet.class),
-        any(ResourceLimits.class), any(SchedulingMode.class));
+    }).when(queue).assignContainers(eq(clusterResource),
+        any(CandidateNodeSet.class), any(ResourceLimits.class),
+        any(SchedulingMode.class));
     doNothing().when(node).releaseContainer(any(ContainerId.class),
         anyBoolean());
   }
@@ -222,8 +219,8 @@ public class TestChildQueueOrder {
   public void testSortedQueues() throws Exception {
     // Setup queue configs
     setupSortedQueues(csConf);
-    Map<String, CSQueue> queues = new HashMap<String, CSQueue>();
-    CSQueue root = 
+    CSQueueStore queues = new CSQueueStore();
+    CSQueue root =
         CapacitySchedulerQueueManager.parseQueue(csContext, csConf, null,
           CapacitySchedulerConfiguration.ROOT, queues, queues, 
           TestUtils.spyHook);
@@ -242,6 +239,8 @@ public class TestChildQueueOrder {
       Resources.createResource(numNodes * (memoryPerNode*GB), 
           numNodes * coresPerNode);
     when(csContext.getNumClusterNodes()).thenReturn(numNodes);
+    root.updateClusterResource(clusterResource,
+        new ResourceLimits(clusterResource));
 
     // Start testing
     CSQueue a = queues.get(A);
@@ -262,7 +261,7 @@ public class TestChildQueueOrder {
     // Stub an App and its containerCompleted
     FiCaSchedulerApp app_0 = getMockApplication(0,user_0);
     doReturn(true).when(app_0).containerCompleted(any(RMContainer.class),
-        any(ContainerStatus.class), any(RMContainerEventType.class),
+        any(), any(RMContainerEventType.class),
         any(String.class));
 
     Priority priority = TestUtils.createMockPriority(1); 
@@ -425,10 +424,10 @@ public class TestChildQueueOrder {
         clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
     InOrder allocationOrder = inOrder(d,b);
     allocationOrder.verify(d).assignContainers(eq(clusterResource),
-        any(PlacementSet.class), any(ResourceLimits.class),
+        any(CandidateNodeSet.class), any(ResourceLimits.class),
         any(SchedulingMode.class));
     allocationOrder.verify(b).assignContainers(eq(clusterResource),
-        any(PlacementSet.class), any(ResourceLimits.class),
+        any(CandidateNodeSet.class), any(ResourceLimits.class),
         any(SchedulingMode.class));
     verifyQueueMetrics(a, 3*GB, clusterResource);
     verifyQueueMetrics(b, 2*GB, clusterResource);

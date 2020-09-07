@@ -29,7 +29,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -42,13 +44,14 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadPoolExecutor;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.StorageType;
-import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
@@ -86,7 +89,7 @@ import com.google.common.base.Preconditions;
 /** Dispatching block replica moves between datanodes. */
 @InterfaceAudience.Private
 public class Dispatcher {
-  static final Log LOG = LogFactory.getLog(Dispatcher.class);
+  static final Logger LOG = LoggerFactory.getLogger(Dispatcher.class);
 
   /**
    * the period of time to delay the usage of a DataNode after hitting
@@ -120,6 +123,7 @@ public class Dispatcher {
 
   /** The maximum number of concurrent blocks moves at a datanode */
   private final int maxConcurrentMovesPerNode;
+  private final int maxMoverThreads;
 
   private final long getBlocksSize;
   private final long getBlocksMinBlockSize;
@@ -135,14 +139,18 @@ public class Dispatcher {
   private final boolean connectToDnViaHostname;
   private BlockPlacementPolicies placementPolicies;
 
+  private long maxIterationTime;
+
   static class Allocator {
     private final int max;
     private int count = 0;
+    private int lotSize = 1;
 
     Allocator(int max) {
       this.max = max;
     }
 
+    /** Allocate specified number of items */
     synchronized int allocate(int n) {
       final int remaining = max - count;
       if (remaining <= 0) {
@@ -154,8 +162,18 @@ public class Dispatcher {
       }
     }
 
+    /** Aloocate a single lot of items */
+    int allocate() {
+      return allocate(lotSize);
+    }
+
     synchronized void reset() {
       count = 0;
+    }
+
+    /** Set the lot size */
+    synchronized void setLotSize(int lotSize) {
+      this.lotSize = lotSize;
     }
   }
 
@@ -331,13 +349,19 @@ public class Dispatcher {
 
     /** Dispatch the move to the proxy source & wait for the response. */
     private void dispatch() {
-      LOG.info("Start moving " + this);
-      assert !(reportedBlock instanceof DBlockStriped);
-
       Socket sock = new Socket();
       DataOutputStream out = null;
       DataInputStream in = null;
       try {
+        if (source.isIterationOver()){
+          LOG.info("Cancel moving " + this +
+              " as iteration is already cancelled due to" +
+              " dfs.balancer.max-iteration-time is passed.");
+          throw new IOException("Block move cancelled.");
+        }
+        LOG.info("Start moving " + this);
+        assert !(reportedBlock instanceof DBlockStriped);
+
         sock.connect(
             NetUtils.createSocketAddr(target.getDatanodeInfo().
                 getXferAddr(Dispatcher.this.connectToDnViaHostname)),
@@ -355,7 +379,8 @@ public class Dispatcher {
         ExtendedBlock eb = new ExtendedBlock(nnc.getBlockpoolID(),
             reportedBlock.getBlock());
         final KeyManager km = nnc.getKeyManager(); 
-        Token<BlockTokenIdentifier> accessToken = km.getAccessToken(eb);
+        Token<BlockTokenIdentifier> accessToken = km.getAccessToken(eb,
+            new StorageType[]{target.storageType}, new String[0]);
         IOStreamPair saslStreams = saslClient.socketSend(sock, unbufOut,
             unbufIn, km, accessToken, target.getDatanodeInfo());
         unbufOut = saslStreams.out;
@@ -409,7 +434,8 @@ public class Dispatcher {
     private void sendRequest(DataOutputStream out, ExtendedBlock eb,
         Token<BlockTokenIdentifier> accessToken) throws IOException {
       new Sender(out).replaceBlock(eb, target.storageType, accessToken,
-          source.getDatanodeInfo().getDatanodeUuid(), proxySource.datanode);
+          source.getDatanodeInfo().getDatanodeUuid(), proxySource.datanode,
+          null);
     }
 
     /** Check whether to continue waiting for response */
@@ -743,7 +769,10 @@ public class Dispatcher {
      * Check if the iteration is over
      */
     public boolean isIterationOver() {
-      return (Time.monotonicNow()-startTime > MAX_ITERATION_TIME);
+      if (maxIterationTime < 0){
+        return false;
+      }
+      return (Time.monotonicNow()-startTime > maxIterationTime);
     }
 
     /** Add a task */
@@ -768,7 +797,7 @@ public class Dispatcher {
     private long getBlockList() throws IOException {
       final long size = Math.min(getBlocksSize, blocksToReceive);
       final BlocksWithLocations newBlksLocs =
-          nnc.getBlocks(getDatanodeInfo(), size);
+          nnc.getBlocks(getDatanodeInfo(), size, getBlocksMinBlockSize);
 
       if (LOG.isTraceEnabled()) {
         LOG.trace("getBlocks(" + getDatanodeInfo() + ", "
@@ -891,8 +920,6 @@ public class Dispatcher {
       return blocksToReceive > 0;
     }
 
-    private static final long MAX_ITERATION_TIME = 20 * 60 * 1000L; // 20 mins
-
     /**
      * This method iteratively does the following: it first selects a block to
      * move, then sends a request to the proxy source to start the block move
@@ -900,6 +927,7 @@ public class Dispatcher {
      * namenode for more blocks. It terminates when it has dispatch enough block
      * move tasks or it has received enough blocks from the namenode, or the
      * elapsed time of the iteration has exceeded the max time limit.
+     *
      */
     private void dispatchBlocks() {
       this.blocksToReceive = 2 * getScheduledSize();
@@ -960,7 +988,7 @@ public class Dispatcher {
       }
 
       if (isIterationOver()) {
-        LOG.info("The maximum iteration time (" + MAX_ITERATION_TIME/1000
+        LOG.info("The maximum iteration time (" + maxIterationTime/1000
             + " seconds) has been reached. Stopping " + this);
       }
     }
@@ -983,14 +1011,14 @@ public class Dispatcher {
       int maxNoMoveInterval, Configuration conf) {
     this(nnc, includedNodes, excludedNodes, movedWinWidth,
         moverThreads, dispatcherThreads, maxConcurrentMovesPerNode,
-        0L, 0L, 0, maxNoMoveInterval, conf);
+        0L, 0L, 0, maxNoMoveInterval, -1, conf);
   }
 
   Dispatcher(NameNodeConnector nnc, Set<String> includedNodes,
       Set<String> excludedNodes, long movedWinWidth, int moverThreads,
       int dispatcherThreads, int maxConcurrentMovesPerNode,
-      long getBlocksSize, long getBlocksMinBlockSize,
-      int blockMoveTimeout, int maxNoMoveInterval, Configuration conf) {
+      long getBlocksSize, long getBlocksMinBlockSize, int blockMoveTimeout,
+      int maxNoMoveInterval, long maxIterationTime, Configuration conf) {
     this.nnc = nnc;
     this.excludedNodes = excludedNodes;
     this.includedNodes = includedNodes;
@@ -1001,6 +1029,7 @@ public class Dispatcher {
     this.dispatchExecutor = dispatcherThreads == 0? null
         : Executors.newFixedThreadPool(dispatcherThreads);
     this.moverThreadAllocator = new Allocator(moverThreads);
+    this.maxMoverThreads = moverThreads;
     this.maxConcurrentMovesPerNode = maxConcurrentMovesPerNode;
 
     this.getBlocksSize = getBlocksSize;
@@ -1016,6 +1045,7 @@ public class Dispatcher {
         HdfsClientConfigKeys.DFS_CLIENT_USE_DN_HOSTNAME,
         HdfsClientConfigKeys.DFS_CLIENT_USE_DN_HOSTNAME_DEFAULT);
     placementPolicies = new BlockPlacementPolicies(conf, null, cluster, null);
+    this.maxIterationTime = maxIterationTime;
   }
 
   public DistributedFileSystem getDistributedFileSystem() {
@@ -1079,7 +1109,8 @@ public class Dispatcher {
     final List<DatanodeStorageReport> trimmed = new ArrayList<DatanodeStorageReport>(); 
     // create network topology and classify utilization collections:
     // over-utilized, above-average, below-average and under-utilized.
-    for (DatanodeStorageReport r : DFSUtil.shuffle(reports)) {
+    Collections.shuffle(Arrays.asList(reports));
+    for (DatanodeStorageReport r : reports) {
       final DatanodeInfo datanode = r.getDatanodeInfo();
       if (shouldIgnore(datanode)) {
         continue;
@@ -1100,7 +1131,7 @@ public class Dispatcher {
     final DDatanode targetDn = p.target.getDDatanode();
     ExecutorService moveExecutor = targetDn.getMoveExecutor();
     if (moveExecutor == null) {
-      final int nThreads = moverThreadAllocator.allocate(maxConcurrentMovesPerNode);
+      final int nThreads = moverThreadAllocator.allocate();
       if (nThreads > 0) {
         moveExecutor = targetDn.initMoveExecutor(nThreads);
       }
@@ -1134,6 +1165,29 @@ public class Dispatcher {
   private long dispatchBlockMoves() throws InterruptedException {
     final long bytesLastMoved = getBytesMoved();
     final Future<?>[] futures = new Future<?>[sources.size()];
+
+    int concurrentThreads = Math.min(sources.size(),
+        ((ThreadPoolExecutor)dispatchExecutor).getCorePoolSize());
+    assert concurrentThreads > 0 : "Number of concurrent threads is 0.";
+    LOG.debug("Balancer concurrent dispatcher threads = {}", concurrentThreads);
+
+    // Determine the size of each mover thread pool per target
+    int threadsPerTarget = maxMoverThreads/targets.size();
+    if (threadsPerTarget == 0) {
+      // Some scheduled moves will get ignored as some targets won't have
+      // any threads allocated.
+      moverThreadAllocator.setLotSize(1);
+      LOG.warn(DFSConfigKeys.DFS_BALANCER_MOVERTHREADS_KEY + "=" +
+          maxMoverThreads + " is too small for moving blocks to " +
+          targets.size() + " targets. Balancing may be slower.");
+    } else {
+      if  (threadsPerTarget > maxConcurrentMovesPerNode) {
+        threadsPerTarget = maxConcurrentMovesPerNode;
+        LOG.info("Limiting threads per target to the specified max.");
+      }
+      moverThreadAllocator.setLotSize(threadsPerTarget);
+      LOG.info("Allocating " + threadsPerTarget + " threads per target.");
+    }
 
     final Iterator<Source> i = sources.iterator();
     for (int j = 0; j < futures.length; j++) {

@@ -247,9 +247,9 @@ public class KMSACLs implements Runnable, KeyACLs {
         if (blacklist == null) {
           LOG.debug("No blacklist for {}", type.toString());
         } else if (access) {
-          LOG.debug("user is in {}" , blacklist.getAclString());
-        } else {
           LOG.debug("user is not in {}" , blacklist.getAclString());
+        } else {
+          LOG.debug("user is in {}" , blacklist.getAclString());
         }
       }
     }
@@ -311,7 +311,7 @@ public class KMSACLs implements Runnable, KeyACLs {
       return false;
     } else {
       if (LOG.isDebugEnabled()) {
-        LOG.debug("Checking user [{}] for: {}: {}" + ugi.getShortUserName(),
+        LOG.debug("Checking user [{}] for: {}: {}", ugi.getShortUserName(),
             opType.toString(), acl.getAclString());
       }
       return acl.isUserAllowed(ugi);
@@ -326,4 +326,8 @@ public class KMSACLs implements Runnable, KeyACLs {
         || whitelistKeyAcls.containsKey(opType));
   }
 
+  @VisibleForTesting
+  void forceNextReloadForTesting() {
+    lastReload = 0;
+  }
 }

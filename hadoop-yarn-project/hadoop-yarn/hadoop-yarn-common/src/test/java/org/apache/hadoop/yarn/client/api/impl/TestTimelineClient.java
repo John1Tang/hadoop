@@ -18,14 +18,15 @@
 
 package org.apache.hadoop.yarn.client.api.impl;
 
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 
-import java.io.File;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
@@ -34,6 +35,7 @@ import java.security.PrivilegedExceptionAction;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.http.HttpConfig.Policy;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.ssl.KeyStoreTestUtil;
@@ -61,6 +63,8 @@ public class TestTimelineClient {
 
   private TimelineClientImpl client;
   private TimelineWriter spyTimelineWriter;
+  private String keystoresDir;
+  private String sslConfDir;
 
   @Before
   public void setup() {
@@ -71,9 +75,12 @@ public class TestTimelineClient {
   }
 
   @After
-  public void tearDown() {
+  public void tearDown() throws Exception {
     if (client != null) {
       client.stop();
+    }
+    if (isSSLConfigured()) {
+      KeyStoreTestUtil.cleanupSSLConfig(keystoresDir, sslConfDir);
     }
   }
 
@@ -236,13 +243,14 @@ public class TestTimelineClient {
     // use kerberos to bypass the issue in HADOOP-11215
     conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION,
         "kerberos");
+    conf.set(YarnConfiguration.TIMELINE_HTTP_AUTH_TYPE, "kerberos");
     UserGroupInformation.setConfiguration(conf);
 
     TimelineClientImpl client = createTimelineClient(conf);
     TimelineClientImpl clientFake =
         createTimelineClientFakeTimelineClientRetryOp(conf);
-    TestTimlineDelegationTokenSecretManager dtManager =
-        new TestTimlineDelegationTokenSecretManager();
+    TestTimelineDelegationTokenSecretManager dtManager =
+        new TestTimelineDelegationTokenSecretManager();
     try {
       dtManager.startThreads();
       Thread.sleep(3000);
@@ -327,12 +335,12 @@ public class TestTimelineClient {
     ClientResponse response = mock(ClientResponse.class);
     if (hasRuntimeError) {
       doThrow(new ClientHandlerException(new ConnectException())).when(
-        spyTimelineWriter).doPostingObject(
-        any(TimelineEntities.class), any(String.class));
+          spyTimelineWriter).doPostingObject(
+              any(TimelineEntities.class), any());
       return response;
     }
     doReturn(response).when(spyTimelineWriter)
-        .doPostingObject(any(TimelineEntities.class), any(String.class));
+        .doPostingObject(any(TimelineEntities.class), any());
     when(response.getStatusInfo()).thenReturn(status);
     TimelinePutResponse.TimelinePutError error =
         new TimelinePutResponse.TimelinePutError();
@@ -451,12 +459,9 @@ public class TestTimelineClient {
     YarnConfiguration conf = new YarnConfiguration();
     conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED, true);
     conf.setInt(YarnConfiguration.TIMELINE_SERVICE_CLIENT_MAX_RETRIES, 0);
+    conf.set(YarnConfiguration.YARN_HTTP_POLICY_KEY, Policy.HTTPS_ONLY.name());
 
-    File testDir = TestGenericTestUtils.getTestDir();
-    String sslConfDir =
-        KeyStoreTestUtil.getClasspathDir(TestTimelineClient.class);
-    KeyStoreTestUtil.setupSSLConfig(testDir.getAbsolutePath(),
-        sslConfDir, conf, false);
+    setupSSLConfig(conf);
     client = createTimelineClient(conf);
 
     ThreadGroup threadGroup = Thread.currentThread().getThreadGroup();
@@ -490,10 +495,32 @@ public class TestTimelineClient {
     Assert.assertFalse("Reloader is still alive", reloaderStillAlive);
   }
 
-  private static class TestTimlineDelegationTokenSecretManager extends
+  @Test
+  public void testTimelineConnectorDestroy() {
+    YarnConfiguration conf = new YarnConfiguration();
+    conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED, true);
+    TimelineClientImpl client = createTimelineClient(conf);
+    Client mockJerseyClient = mock(Client.class);
+    client.connector.client = mockJerseyClient;
+    client.stop();
+    verify(mockJerseyClient, times(1)).destroy();
+  }
+
+  private void setupSSLConfig(YarnConfiguration conf) throws Exception {
+    keystoresDir = TestGenericTestUtils.getTestDir().getAbsolutePath();
+    sslConfDir =
+        KeyStoreTestUtil.getClasspathDir(TestTimelineClient.class);
+    KeyStoreTestUtil.setupSSLConfig(keystoresDir, sslConfDir, conf, false);
+  }
+
+  private boolean isSSLConfigured() {
+    return keystoresDir != null && sslConfDir != null;
+  }
+
+  private static class TestTimelineDelegationTokenSecretManager extends
       AbstractDelegationTokenSecretManager<TimelineDelegationTokenIdentifier> {
 
-    public TestTimlineDelegationTokenSecretManager() {
+    public TestTimelineDelegationTokenSecretManager() {
       super(100000, 100000, 100000, 100000);
     }
 

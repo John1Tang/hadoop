@@ -24,6 +24,8 @@ import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.common.GenerationStamp;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLog;
 
 import java.io.IOException;
 
@@ -31,8 +33,8 @@ import static org.apache.hadoop.hdfs.protocol.BlockType.STRIPED;
 
 /**
  * BlockIdManager allocates the generation stamps and the block ID. The
- * {@see FSNamesystem} is responsible for persisting the allocations in the
- * {@see EditLog}.
+ * {@link FSNamesystem} is responsible for persisting the allocations in the
+ * {@link FSEditLog}.
  */
 public class BlockIdManager {
   /**
@@ -44,6 +46,23 @@ public class BlockIdManager {
    * The global generation stamp for this file system.
    */
   private final GenerationStamp generationStamp = new GenerationStamp();
+  /**
+   * Most recent global generation stamp as seen on Active NameNode.
+   * Used by StandbyNode only.<p/>
+   * StandbyNode does not update its global {@link #generationStamp} during
+   * edits tailing. The global generation stamp on StandbyNode is updated
+   * <ol><li>when the block with the next generation stamp is actually
+   * received</li>
+   * <li>during fail-over it is bumped to the last value received from the
+   * Active NN through edits and stored as
+   * {@link #impendingGenerationStamp}</li></ol>
+   * The former helps to avoid a race condition with IBRs during edits tailing.
+   * The latter guarantees that generation stamps are never reused by new
+   * Active after fail-over.
+   * <p/> See HDFS-14941 for more details.
+   */
+  private final GenerationStamp impendingGenerationStamp
+      = new GenerationStamp();
   /**
    * The value of the generation stamp when the first switch to sequential
    * block IDs was made. Blocks with generation stamps below this value
@@ -160,6 +179,35 @@ public class BlockIdManager {
     generationStamp.setCurrentValue(stamp);
   }
 
+  /**
+   * Set the currently highest gen stamp from active. Used
+   * by Standby only.
+   * @param stamp new genstamp
+   */
+  public void setImpendingGenerationStamp(long stamp) {
+    impendingGenerationStamp.setIfGreater(stamp);
+  }
+
+  /**
+   * Set the current genstamp to the impending genstamp.
+   */
+  public void applyImpendingGenerationStamp() {
+    setGenerationStampIfGreater(impendingGenerationStamp.getCurrentValue());
+  }
+
+  @VisibleForTesting
+  public long getImpendingGenerationStamp() {
+    return impendingGenerationStamp.getCurrentValue();
+  }
+
+  /**
+   * Set genstamp only when the given one is higher.
+   * @param stamp
+   */
+  public void setGenerationStampIfGreater(long stamp) {
+    generationStamp.setIfGreater(stamp);
+  }
+
   public long getGenerationStamp() {
     return generationStamp.getCurrentValue();
   }
@@ -237,6 +285,23 @@ public class BlockIdManager {
     legacyGenerationStampLimit = HdfsConstants.GRANDFATHER_GENERATION_STAMP;
   }
 
+  /**
+   * Return true if the block is a striped block.
+   *
+   * Before HDFS-4645, block ID was randomly generated (legacy), so it is
+   * possible that legacy block ID to be negative, which should not be
+   * considered as striped block ID.
+   *
+   * @see #isLegacyBlock(Block) detecting legacy block IDs.
+   */
+  public boolean isStripedBlock(Block block) {
+    return isStripedBlockID(block.getBlockId()) && !isLegacyBlock(block);
+  }
+
+  /**
+   * See {@link #isStripedBlock(Block)}, we should not use this function alone
+   * to determine a block is striped block.
+   */
   public static boolean isStripedBlockID(long id) {
     return BlockType.fromBlockId(id) == STRIPED;
   }

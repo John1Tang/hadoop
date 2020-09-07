@@ -17,6 +17,13 @@
  */
 package org.apache.hadoop.fs.viewfs;
 
+import static org.apache.hadoop.fs.impl.PathCapabilitiesSupport.validatePathCapabilityArgs;
+import static org.apache.hadoop.fs.viewfs.Constants.CONFIG_VIEWFS_ENABLE_INNER_CACHE;
+import static org.apache.hadoop.fs.viewfs.Constants.CONFIG_VIEWFS_ENABLE_INNER_CACHE_DEFAULT;
+import static org.apache.hadoop.fs.viewfs.Constants.CONFIG_VIEWFS_IGNORE_PORT_IN_MOUNT_TABLE_NAME;
+import static org.apache.hadoop.fs.viewfs.Constants.CONFIG_VIEWFS_IGNORE_PORT_IN_MOUNT_TABLE_NAME_DEFAULT;
+import static org.apache.hadoop.fs.viewfs.Constants.CONFIG_VIEWFS_MOUNT_LINKS_AS_SYMLINKS;
+import static org.apache.hadoop.fs.viewfs.Constants.CONFIG_VIEWFS_MOUNT_LINKS_AS_SYMLINKS_DEFAULT;
 import static org.apache.hadoop.fs.viewfs.Constants.PERMISSION_555;
 
 import java.io.FileNotFoundException;
@@ -26,18 +33,23 @@ import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.Map.Entry;
+import java.util.Objects;
+import java.util.Set;
 
+import com.google.common.base.Preconditions;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.BlockStoragePolicySpi;
+import org.apache.hadoop.fs.CommonPathCapabilities;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -54,7 +66,6 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.QuotaUsage;
 import org.apache.hadoop.fs.RemoteIterator;
-import org.apache.hadoop.fs.UnsupportedFileSystemException;
 import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
@@ -81,13 +92,91 @@ public class ViewFileSystem extends FileSystem {
 
   static AccessControlException readOnlyMountTable(final String operation,
       final String p) {
-    return new AccessControlException( 
-        "InternalDir of ViewFileSystem is readonly; operation=" + operation + 
-        "Path=" + p);
+    return new AccessControlException(
+        "InternalDir of ViewFileSystem is readonly, operation " + operation +
+            " not permitted on path " + p + ".");
   }
   static AccessControlException readOnlyMountTable(final String operation,
       final Path p) {
     return readOnlyMountTable(operation, p.toString());
+  }
+
+  /**
+   * Gets file system creator instance.
+   */
+  protected FsGetter fsGetter() {
+    return new FsGetter();
+  }
+
+  /**
+   * Caching children filesystems. HADOOP-15565.
+   */
+  static class InnerCache {
+    private Map<Key, FileSystem> map = new HashMap<>();
+    private FsGetter fsCreator;
+
+    InnerCache(FsGetter fsCreator) {
+      this.fsCreator = fsCreator;
+    }
+
+    FileSystem get(URI uri, Configuration config) throws IOException {
+      Key key = new Key(uri);
+      if (map.get(key) == null) {
+        FileSystem fs = fsCreator.getNewInstance(uri, config);
+        map.put(key, fs);
+        return fs;
+      } else {
+        return map.get(key);
+      }
+    }
+
+    void closeAll() {
+      for (FileSystem fs : map.values()) {
+        try {
+          fs.close();
+        } catch (IOException e) {
+          LOG.info("Fail closing ViewFileSystem's child filesystem " + fs, e);
+        }
+      }
+    }
+
+    InnerCache unmodifiableCache() {
+      map = Collections.unmodifiableMap(map);
+      return this;
+    }
+
+    /**
+     * All the cached instances share the same UGI so there is no need to have a
+     * URI in the Key. Make the Key simple with just the scheme and authority.
+     */
+    private static class Key {
+      private final String scheme;
+      private final String authority;
+
+      Key(URI uri) {
+        scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase();
+        authority =
+            uri.getAuthority() == null ? "" : uri.getAuthority().toLowerCase();
+      }
+
+      @Override
+      public int hashCode() {
+        return Objects.hash(scheme, authority);
+      }
+
+      @Override
+      public boolean equals(Object obj) {
+        if (obj == this) {
+          return true;
+        }
+        if (obj != null && obj instanceof Key) {
+          Key that = (Key) obj;
+          return this.scheme.equals(that.scheme) && this.authority
+              .equals(that.authority);
+        }
+        return false;
+      }
+    }
   }
 
   /**
@@ -121,12 +210,15 @@ public class ViewFileSystem extends FileSystem {
 
   final long creationTime; // of the the mount table
   final UserGroupInformation ugi; // the user/group of user who created mtable
-  URI myUri;
+  private URI myUri;
   private Path workingDir;
   Configuration config;
   InodeTree<FileSystem> fsState;  // the fs state; ie the mount table
   Path homeDir = null;
-  
+  private boolean enableInnerCache = false;
+  private InnerCache cache;
+  // Default to rename within same mountpoint
+  private RenameStrategy renameStrategy = RenameStrategy.SAME_MOUNTPOINT;
   /**
    * Make the path Absolute and get the path-part of a pathname.
    * Checks that URI matches this file system 
@@ -167,6 +259,15 @@ public class ViewFileSystem extends FileSystem {
   }
 
   /**
+   * Returns false as it does not support to add fallback link automatically on
+   * no mounts.
+   */
+  boolean supportAutoAddingFallbackOnNoMounts() {
+    return false;
+  }
+
+
+  /**
    * Called after a new FileSystem instance is constructed.
    * @param theUri a uri whose authority section names the host, port, etc. for
    *        this FileSystem
@@ -178,39 +279,64 @@ public class ViewFileSystem extends FileSystem {
     super.initialize(theUri, conf);
     setConf(conf);
     config = conf;
+    enableInnerCache = config.getBoolean(CONFIG_VIEWFS_ENABLE_INNER_CACHE,
+        CONFIG_VIEWFS_ENABLE_INNER_CACHE_DEFAULT);
+    FsGetter fsGetter = fsGetter();
+    final InnerCache innerCache = new InnerCache(fsGetter);
     // Now build  client side view (i.e. client side mount table) from config.
     final String authority = theUri.getAuthority();
+    String tableName = authority;
+    if (theUri.getPort() != -1 && config
+        .getBoolean(CONFIG_VIEWFS_IGNORE_PORT_IN_MOUNT_TABLE_NAME,
+            CONFIG_VIEWFS_IGNORE_PORT_IN_MOUNT_TABLE_NAME_DEFAULT)) {
+      tableName = theUri.getHost();
+    }
     try {
-      myUri = new URI(FsConstants.VIEWFS_SCHEME, authority, "/", null, null);
-      fsState = new InodeTree<FileSystem>(conf, authority) {
-
+      myUri = new URI(getScheme(), authority, "/", null, null);
+      boolean initingUriAsFallbackOnNoMounts =
+          supportAutoAddingFallbackOnNoMounts();
+      fsState = new InodeTree<FileSystem>(conf, tableName, myUri,
+          initingUriAsFallbackOnNoMounts) {
         @Override
-        protected
-        FileSystem getTargetFileSystem(final URI uri)
+        protected FileSystem getTargetFileSystem(final URI uri)
           throws URISyntaxException, IOException {
-            return new ChRootedFileSystem(uri, config);
+            FileSystem fs;
+            if (enableInnerCache) {
+              fs = innerCache.get(uri, config);
+            } else {
+              fs = fsGetter.get(uri, config);
+            }
+            return new ChRootedFileSystem(fs, uri);
         }
 
         @Override
-        protected
-        FileSystem getTargetFileSystem(final INodeDir<FileSystem> dir)
-          throws URISyntaxException {
-          return new InternalDirOfViewFs(dir, creationTime, ugi, myUri);
+        protected FileSystem getTargetFileSystem(final INodeDir<FileSystem> dir)
+            throws URISyntaxException {
+          return new InternalDirOfViewFs(dir, creationTime, ugi, myUri, config,
+              this);
         }
 
         @Override
-        protected
-        FileSystem getTargetFileSystem(URI[] mergeFsURIList)
-            throws URISyntaxException, UnsupportedFileSystemException {
-          throw new UnsupportedFileSystemException("mergefs not implemented");
-          // return MergeFs.createMergeFs(mergeFsURIList, config);
+        protected FileSystem getTargetFileSystem(final String settings,
+            final URI[] uris) throws URISyntaxException, IOException {
+          return NflyFSystem.createFileSystem(uris, config, settings,
+              fsGetter);
         }
       };
       workingDir = this.getHomeDirectory();
+      renameStrategy = RenameStrategy.valueOf(
+          conf.get(Constants.CONFIG_VIEWFS_RENAME_STRATEGY,
+              RenameStrategy.SAME_MOUNTPOINT.toString()));
     } catch (URISyntaxException e) {
       throw new IOException("URISyntax exception: " + theUri);
     }
 
+    if (enableInnerCache) {
+      // All fs instances are created and cached on startup. The cache is
+      // readonly after the initialize() so the concurrent access of the cache
+      // is safe.
+      cache = innerCache.unmodifiableCache();
+    }
   }
 
   /**
@@ -386,6 +512,14 @@ public class ViewFileSystem extends FileSystem {
         : new ViewFsFileStatus(orig, qualified);
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * If the given path is a symlink(mount link), the path will be resolved to a
+   * target path and it will get the resolved path's FileStatus object. It will
+   * not be represented as a symlink and isDirectory API returns true if the
+   * resolved path is a directory, false otherwise.
+   */
   @Override
   public FileStatus getFileStatus(final Path f) throws AccessControlException,
       FileNotFoundException, IOException {
@@ -403,6 +537,33 @@ public class ViewFileSystem extends FileSystem {
     res.targetFileSystem.access(res.remainingPath, mode);
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * Note: listStatus considers listing from fallbackLink if available. If the
+   * same directory path is present in configured mount path as well as in
+   * fallback fs, then only the fallback path will be listed in the returned
+   * result except for link.
+   *
+   * If any of the the immediate children of the given path f is a symlink(mount
+   * link), the returned FileStatus object of that children would be represented
+   * as a symlink. It will not be resolved to the target path and will not get
+   * the target path FileStatus object. The target path will be available via
+   * getSymlink on that children's FileStatus object. Since it represents as
+   * symlink, isDirectory on that children's FileStatus will return false.
+   * This behavior can be changed by setting an advanced configuration
+   * fs.viewfs.mount.links.as.symlinks to false. In this case, mount points will
+   * be represented as non-symlinks and all the file/directory attributes like
+   * permissions, isDirectory etc will be assigned from it's resolved target
+   * directory/file.
+   *
+   * If you want to get the FileStatus of target path for that children, you may
+   * want to use GetFileStatus API with that children's symlink path. Please see
+   * {@link ViewFileSystem#getFileStatus(Path f)}
+   *
+   * Note: In ViewFileSystem, by default the mount links are represented as
+   * symlinks.
+   */
   @Override
   public FileStatus[] listStatus(final Path f) throws AccessControlException,
       FileNotFoundException, IOException {
@@ -451,18 +612,30 @@ public class ViewFileSystem extends FileSystem {
 
   private Path getChrootedPath(InodeTree.ResolveResult<FileSystem> res,
       FileStatus status, Path f) throws IOException {
-    final String suffix = ((ChRootedFileSystem)res.targetFileSystem)
-        .stripOutRoot(status.getPath());
+    final String suffix;
+    if (res.targetFileSystem instanceof ChRootedFileSystem) {
+      suffix = ((ChRootedFileSystem)res.targetFileSystem)
+          .stripOutRoot(status.getPath());
+    } else { // nfly
+      suffix = ((NflyFSystem.NflyStatus)status).stripRoot();
+    }
     return this.makeQualified(
         suffix.length() == 0 ? f : new Path(res.resolvedPath, suffix));
+  }
+
+  @Override
+  public boolean mkdirs(Path dir) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+        fsState.resolve(getUriPath(dir), false);
+    return res.targetFileSystem.mkdirs(res.remainingPath);
   }
 
   @Override
   public boolean mkdirs(final Path dir, final FsPermission permission)
       throws IOException {
     InodeTree.ResolveResult<FileSystem> res = 
-      fsState.resolve(getUriPath(dir), false);
-   return  res.targetFileSystem.mkdirs(res.remainingPath, permission);
+        fsState.resolve(getUriPath(dir), false);
+    return res.targetFileSystem.mkdirs(res.remainingPath, permission);
   }
 
   @Override
@@ -490,27 +663,60 @@ public class ViewFileSystem extends FileSystem {
     if (resDst.isInternalDir()) {
           throw readOnlyMountTable("rename", dst);
     }
-    /**
-    // Alternate 1: renames within same file system - valid but we disallow
-    // Alternate 2: (as described in next para - valid but we have disallowed it
-    //
-    // Note we compare the URIs. the URIs include the link targets. 
-    // hence we allow renames across mount links as long as the mount links
-    // point to the same target.
-    if (!resSrc.targetFileSystem.getUri().equals(
-              resDst.targetFileSystem.getUri())) {
-      throw new IOException("Renames across Mount points not supported");
+
+    URI srcUri = resSrc.targetFileSystem.getUri();
+    URI dstUri = resDst.targetFileSystem.getUri();
+
+    verifyRenameStrategy(srcUri, dstUri,
+        resSrc.targetFileSystem == resDst.targetFileSystem, renameStrategy);
+
+    if (resSrc.targetFileSystem instanceof ChRootedFileSystem &&
+        resDst.targetFileSystem instanceof ChRootedFileSystem) {
+      ChRootedFileSystem srcFS = (ChRootedFileSystem) resSrc.targetFileSystem;
+      ChRootedFileSystem dstFS = (ChRootedFileSystem) resDst.targetFileSystem;
+      return srcFS.getMyFs().rename(srcFS.fullPath(resSrc.remainingPath),
+          dstFS.fullPath(resDst.remainingPath));
+    } else {
+      return resSrc.targetFileSystem.rename(resSrc.remainingPath, resDst.remainingPath);
     }
-    */
-    
-    //
-    // Alternate 3 : renames ONLY within the the same mount links.
-    //
-    if (resSrc.targetFileSystem !=resDst.targetFileSystem) {
-      throw new IOException("Renames across Mount points not supported");
+  }
+
+  static void verifyRenameStrategy(URI srcUri, URI dstUri,
+      boolean isSrcDestSame, ViewFileSystem.RenameStrategy renameStrategy)
+      throws IOException {
+    switch (renameStrategy) {
+    case SAME_FILESYSTEM_ACROSS_MOUNTPOINT:
+      if (srcUri.getAuthority() != null) {
+        if (!(srcUri.getScheme().equals(dstUri.getScheme()) && srcUri
+            .getAuthority().equals(dstUri.getAuthority()))) {
+          throw new IOException("Renames across Mount points not supported");
+        }
+      }
+
+      break;
+    case SAME_TARGET_URI_ACROSS_MOUNTPOINT:
+      // Alternate 2: Rename across mountpoints with same target.
+      // i.e. Rename across alias mountpoints.
+      //
+      // Note we compare the URIs. the URIs include the link targets.
+      // hence we allow renames across mount links as long as the mount links
+      // point to the same target.
+      if (!srcUri.equals(dstUri)) {
+        throw new IOException("Renames across Mount points not supported");
+      }
+
+      break;
+    case SAME_MOUNTPOINT:
+      //
+      // Alternate 3 : renames ONLY within the the same mount links.
+      //
+      if (!isSrcDestSame) {
+        throw new IOException("Renames across Mount points not supported");
+      }
+      break;
+    default:
+      throw new IllegalArgumentException ("Unexpected rename strategy");
     }
-    return resSrc.targetFileSystem.rename(resSrc.remainingPath,
-        resDst.remainingPath);
   }
 
   @Override
@@ -733,6 +939,12 @@ public class ViewFileSystem extends FileSystem {
       FileSystem targetFs = mountPoint.target.targetFileSystem;
       children.addAll(Arrays.asList(targetFs.getChildFileSystems()));
     }
+
+    if (fsState.isRootInternalDir() && fsState.getRootFallbackLink() != null) {
+      children.addAll(Arrays.asList(
+          fsState.getRootFallbackLink().targetFileSystem
+              .getChildFileSystems()));
+    }
     return children.toArray(new FileSystem[]{});
   }
   
@@ -771,6 +983,13 @@ public class ViewFileSystem extends FileSystem {
     InodeTree.ResolveResult<FileSystem> res = fsState.resolve(getUriPath(path),
         true);
     res.targetFileSystem.deleteSnapshot(res.remainingPath, snapshotName);
+  }
+
+  @Override
+  public void satisfyStoragePolicy(Path src) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+        fsState.resolve(getUriPath(src), true);
+    res.targetFileSystem.satisfyStoragePolicy(res.remainingPath);
   }
 
   @Override
@@ -888,6 +1107,36 @@ public class ViewFileSystem extends FileSystem {
   }
 
   /**
+   * Reject the concat operation; forward the rest to the viewed FS.
+   * @param path path to query the capability of.
+   * @param capability string to query the stream support for.
+   * @return the capability
+   * @throws IOException if there is no resolved FS, or it raises an IOE.
+   */
+  @Override
+  public boolean hasPathCapability(Path path, String capability)
+      throws IOException {
+    final Path p = makeQualified(path);
+    switch (validatePathCapabilityArgs(p, capability)) {
+    case CommonPathCapabilities.FS_CONCAT:
+      // concat is not supported, as it may be invoked across filesystems.
+      return false;
+    default:
+      // no break
+    }
+    // otherwise, check capabilities of mounted FS.
+    try {
+      InodeTree.ResolveResult<FileSystem> res
+          = fsState.resolve(getUriPath(p), true);
+      return res.targetFileSystem.hasPathCapability(res.remainingPath,
+          capability);
+    } catch (FileNotFoundException e) {
+      // no mount point, nothing will work.
+      throw new NotInMountpointException(p, "hasPathCapability");
+    }
+  }
+
+  /**
    * An instance of this class represents an internal dir of the viewFs
    * that is internal dir of the mount table.
    * It is a read only mount tables and create, mkdir or delete operations
@@ -903,19 +1152,25 @@ public class ViewFileSystem extends FileSystem {
     final long creationTime; // of the the mount table
     final UserGroupInformation ugi; // the user/group of user who created mtable
     final URI myUri;
+    private final boolean showMountLinksAsSymlinks;
+    private InodeTree<FileSystem> fsState;
     
     public InternalDirOfViewFs(final InodeTree.INodeDir<FileSystem> dir,
-        final long cTime, final UserGroupInformation ugi, URI uri)
-      throws URISyntaxException {
+        final long cTime, final UserGroupInformation ugi, URI uri,
+        Configuration config, InodeTree fsState) throws URISyntaxException {
       myUri = uri;
+      this.fsState = fsState;
       try {
-        initialize(myUri, new Configuration());
+        initialize(myUri, config);
       } catch (IOException e) {
         throw new RuntimeException("Cannot occur");
       }
       theInternalDir = dir;
       creationTime = cTime;
       this.ugi = ugi;
+      showMountLinksAsSymlinks = config
+          .getBoolean(CONFIG_VIEWFS_MOUNT_LINKS_AS_SYMLINKS,
+              CONFIG_VIEWFS_MOUNT_LINKS_AS_SYMLINKS_DEFAULT);
     }
 
     static private void checkPathIsSlash(final Path f) throws IOException {
@@ -952,7 +1207,41 @@ public class ViewFileSystem extends FileSystem {
     public FSDataOutputStream create(final Path f,
         final FsPermission permission, final boolean overwrite,
         final int bufferSize, final short replication, final long blockSize,
-        final Progressable progress) throws AccessControlException {
+        final Progressable progress) throws IOException {
+      Preconditions.checkNotNull(f, "File cannot be null.");
+      if (InodeTree.SlashPath.equals(f)) {
+        throw new FileAlreadyExistsException(
+            "/ is not a file. The directory / already exist at: "
+                + theInternalDir.fullPath);
+      }
+
+      if (this.fsState.getRootFallbackLink() != null) {
+
+        if (theInternalDir.getChildren().containsKey(f.getName())) {
+          throw new FileAlreadyExistsException(
+              "A mount path(file/dir) already exist with the requested path: "
+                  + theInternalDir.getChildren().get(f.getName()).fullPath);
+        }
+
+        FileSystem linkedFallbackFs =
+            this.fsState.getRootFallbackLink().getTargetFileSystem();
+        Path parent = Path.getPathWithoutSchemeAndAuthority(
+            new Path(theInternalDir.fullPath));
+        String leaf = f.getName();
+        Path fileToCreate = new Path(parent, leaf);
+
+        try {
+          return linkedFallbackFs
+              .create(fileToCreate, permission, overwrite, bufferSize,
+                  replication, blockSize, progress);
+        } catch (IOException e) {
+          StringBuilder msg =
+              new StringBuilder("Failed to create file:").append(fileToCreate)
+                  .append(" at fallback : ").append(linkedFallbackFs.getUri());
+          LOG.error(msg.toString(), e);
+          throw e;
+        }
+      }
       throw readOnlyMountTable("create", f);
     }
 
@@ -990,7 +1279,6 @@ public class ViewFileSystem extends FileSystem {
       checkPathIsSlash(f);
       return new FileStatus(0, true, 0, 0, creationTime, creationTime,
           PERMISSION_555, ugi.getShortUserName(), ugi.getPrimaryGroupName(),
-
           new Path(theInternalDir.fullPath).makeQualified(
               myUri, ROOT_PATH));
     }
@@ -1000,42 +1288,186 @@ public class ViewFileSystem extends FileSystem {
     public FileStatus[] listStatus(Path f) throws AccessControlException,
         FileNotFoundException, IOException {
       checkPathIsSlash(f);
-      FileStatus[] result = new FileStatus[theInternalDir.children.size()];
+      FileStatus[] fallbackStatuses = listStatusForFallbackLink();
+      Set<FileStatus> linkStatuses = new HashSet<>();
+      Set<FileStatus> internalDirStatuses = new HashSet<>();
       int i = 0;
-      for (Entry<String, INode<FileSystem>> iEntry : 
-                                          theInternalDir.children.entrySet()) {
+      for (Entry<String, INode<FileSystem>> iEntry :
+          theInternalDir.getChildren().entrySet()) {
         INode<FileSystem> inode = iEntry.getValue();
-        if (inode instanceof INodeLink ) {
+        Path path = new Path(inode.fullPath).makeQualified(myUri, null);
+        if (inode.isLink()) {
           INodeLink<FileSystem> link = (INodeLink<FileSystem>) inode;
 
-          result[i++] = new FileStatus(0, false, 0, 0,
-            creationTime, creationTime, PERMISSION_555,
-            ugi.getShortUserName(), ugi.getPrimaryGroupName(),
-            link.getTargetLink(),
-            new Path(inode.fullPath).makeQualified(
-                myUri, null));
+          if (showMountLinksAsSymlinks) {
+            // To maintain backward compatibility, with default option(showing
+            // mount links as symlinks), we will represent target link as
+            // symlink and rest other properties are belongs to mount link only.
+            linkStatuses.add(
+                new FileStatus(0, false, 0, 0, creationTime, creationTime,
+                    PERMISSION_555, ugi.getShortUserName(),
+                    ugi.getPrimaryGroupName(), link.getTargetLink(), path));
+            continue;
+          }
+
+          //  We will represent as non-symlinks. Here it will show target
+          //  directory/file properties like permissions, isDirectory etc on
+          //  mount path. The path will be a mount link path and isDirectory is
+          //  true if target is dir, otherwise false.
+          String linkedPath = link.getTargetFileSystem().getUri().getPath();
+          if ("".equals(linkedPath)) {
+            linkedPath = "/";
+          }
+          try {
+            FileStatus status =
+                ((ChRootedFileSystem)link.getTargetFileSystem())
+                .getMyFs().getFileStatus(new Path(linkedPath));
+            linkStatuses.add(
+                new FileStatus(status.getLen(), status.isDirectory(),
+                    status.getReplication(), status.getBlockSize(),
+                    status.getModificationTime(), status.getAccessTime(),
+                    status.getPermission(), status.getOwner(),
+                    status.getGroup(), null, path));
+          } catch (FileNotFoundException ex) {
+            LOG.warn("Cannot get one of the children's(" + path
+                + ")  target path(" + link.getTargetFileSystem().getUri()
+                + ") file status.", ex);
+            throw ex;
+          }
         } else {
-          result[i++] = new FileStatus(0, true, 0, 0,
-            creationTime, creationTime, PERMISSION_555,
-            ugi.getShortUserName(), ugi.getGroupNames()[0],
-            new Path(inode.fullPath).makeQualified(
-                myUri, null));
+          internalDirStatuses.add(
+              new FileStatus(0, true, 0, 0, creationTime, creationTime,
+                  PERMISSION_555, ugi.getShortUserName(),
+                  ugi.getPrimaryGroupName(), path));
         }
       }
-      return result;
+      FileStatus[] internalDirStatusesMergedWithFallBack = internalDirStatuses
+          .toArray(new FileStatus[internalDirStatuses.size()]);
+      if (fallbackStatuses.length > 0) {
+        internalDirStatusesMergedWithFallBack =
+            merge(fallbackStatuses, internalDirStatusesMergedWithFallBack);
+      }
+      // Links will always have precedence than internalDir or fallback paths.
+      return merge(linkStatuses.toArray(new FileStatus[linkStatuses.size()]),
+          internalDirStatusesMergedWithFallBack);
+    }
+
+    private FileStatus[] merge(FileStatus[] toStatuses,
+        FileStatus[] fromStatuses) {
+      ArrayList<FileStatus> result = new ArrayList<>();
+      Set<String> pathSet = new HashSet<>();
+      for (FileStatus status : toStatuses) {
+        result.add(status);
+        pathSet.add(status.getPath().getName());
+      }
+      for (FileStatus status : fromStatuses) {
+        if (!pathSet.contains(status.getPath().getName())) {
+          result.add(status);
+        }
+      }
+      return result.toArray(new FileStatus[result.size()]);
+    }
+
+    private FileStatus[] listStatusForFallbackLink() throws IOException {
+      if (this.fsState.getRootFallbackLink() != null) {
+        FileSystem linkedFallbackFs =
+            this.fsState.getRootFallbackLink().getTargetFileSystem();
+        Path p = Path.getPathWithoutSchemeAndAuthority(
+            new Path(theInternalDir.fullPath));
+        if (theInternalDir.isRoot() || linkedFallbackFs.exists(p)) {
+          FileStatus[] statuses = linkedFallbackFs.listStatus(p);
+          for (FileStatus status : statuses) {
+            // Fix the path back to viewfs scheme
+            Path pathFromConfiguredFallbackRoot =
+                new Path(p, status.getPath().getName());
+            status.setPath(
+                new Path(myUri.toString(), pathFromConfiguredFallbackRoot));
+          }
+          return statuses;
+        }
+      }
+      return new FileStatus[0];
+    }
+
+    @Override
+    public ContentSummary getContentSummary(Path f) throws IOException {
+      long[] summary = {0, 0, 1};
+      for (FileStatus status : listStatus(f)) {
+        Path targetPath =
+            Path.getPathWithoutSchemeAndAuthority(status.getPath());
+        InodeTree.ResolveResult<FileSystem> res =
+            fsState.resolve(targetPath.toString(), true);
+        ContentSummary child =
+            res.targetFileSystem.getContentSummary(res.remainingPath);
+        summary[0] += child.getLength();
+        summary[1] += child.getFileCount();
+        summary[2] += child.getDirectoryCount();
+      }
+      return new ContentSummary.Builder()
+          .length(summary[0])
+          .fileCount(summary[1])
+          .directoryCount(summary[2])
+          .build();
+    }
+
+    @Override
+    public FsStatus getStatus(Path p) throws IOException {
+      long[] summary = {0, 0, 0};
+      for (FileStatus status : listStatus(p)) {
+        Path targetPath =
+            Path.getPathWithoutSchemeAndAuthority(status.getPath());
+        InodeTree.ResolveResult<FileSystem> res =
+            fsState.resolve(targetPath.toString(), true);
+        FsStatus child = res.targetFileSystem.getStatus(res.remainingPath);
+        summary[0] += child.getCapacity();
+        summary[1] += child.getUsed();
+        summary[2] += child.getRemaining();
+      }
+      return new FsStatus(summary[0], summary[1], summary[2]);
     }
 
     @Override
     public boolean mkdirs(Path dir, FsPermission permission)
-        throws AccessControlException, FileAlreadyExistsException {
-      if (theInternalDir.isRoot && dir == null) {
+        throws IOException {
+      if (theInternalDir.isRoot() && dir == null) {
         throw new FileAlreadyExistsException("/ already exits");
       }
       // Note dir starts with /
-      if (theInternalDir.children.containsKey(dir.toString().substring(1))) {
+      if (theInternalDir.getChildren().containsKey(
+          dir.toString().substring(1))) {
         return true; // this is the stupid semantics of FileSystem
       }
+
+      if (this.fsState.getRootFallbackLink() != null) {
+        FileSystem linkedFallbackFs =
+            this.fsState.getRootFallbackLink().getTargetFileSystem();
+        Path parent = Path.getPathWithoutSchemeAndAuthority(
+            new Path(theInternalDir.fullPath));
+        String leafChild = (InodeTree.SlashPath.equals(dir)) ?
+            InodeTree.SlashPath.toString() :
+            dir.getName();
+        Path dirToCreate = new Path(parent, leafChild);
+
+        try {
+          return linkedFallbackFs.mkdirs(dirToCreate, permission);
+        } catch (IOException e) {
+          if (LOG.isDebugEnabled()) {
+            StringBuilder msg =
+                new StringBuilder("Failed to create ").append(dirToCreate)
+                    .append(" at fallback : ")
+                    .append(linkedFallbackFs.getUri());
+            LOG.debug(msg.toString(), e);
+          }
+          throw e;
+        }
+      }
+
       throw readOnlyMountTable("mkdirs",  dir);
+    }
+
+    @Override
+    public boolean mkdirs(Path dir) throws IOException {
+      return mkdirs(dir, null);
     }
 
     @Override
@@ -1208,6 +1640,12 @@ public class ViewFileSystem extends FileSystem {
     }
 
     @Override
+    public void satisfyStoragePolicy(Path src) throws IOException {
+      checkPathIsSlash(src);
+      throw readOnlyMountTable("satisfyStoragePolicy", src);
+    }
+
+    @Override
     public void setStoragePolicy(Path src, String policyName)
         throws IOException {
       checkPathIsSlash(src);
@@ -1239,6 +1677,19 @@ public class ViewFileSystem extends FileSystem {
         }
       }
       return allPolicies;
+    }
+  }
+
+  enum RenameStrategy {
+    SAME_MOUNTPOINT, SAME_TARGET_URI_ACROSS_MOUNTPOINT,
+    SAME_FILESYSTEM_ACROSS_MOUNTPOINT
+  }
+
+  @Override
+  public void close() throws IOException {
+    super.close();
+    if (enableInnerCache && cache != null) {
+      cache.closeAll();
     }
   }
 }

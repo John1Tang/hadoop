@@ -24,18 +24,19 @@ import static org.junit.Assert.assertTrue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A test class for InstrumentedReadLock and InstrumentedWriteLock.
  */
 public class TestInstrumentedReadWriteLock {
 
-  static final Log LOG = LogFactory.getLog(TestInstrumentedReadWriteLock.class);
+  static final Logger LOG = LoggerFactory.getLogger(
+          TestInstrumentedReadWriteLock.class);
 
   @Rule
   public TestName name = new TestName();
@@ -145,9 +146,10 @@ public class TestInstrumentedReadWriteLock {
     InstrumentedReadLock readLock = new InstrumentedReadLock(testname, LOG,
         readWriteLock, 2000, 300, mclock) {
       @Override
-      protected void logWarning(long lockHeldTime, long suppressed) {
+      protected void logWarning(
+          long lockHeldTime, SuppressedSnapshot stats) {
         wlogged.incrementAndGet();
-        wsuppresed.set(suppressed);
+        wsuppresed.set(stats.getSuppressedCount());
       }
     };
 
@@ -199,9 +201,9 @@ public class TestInstrumentedReadWriteLock {
     InstrumentedWriteLock writeLock = new InstrumentedWriteLock(testname, LOG,
         readWriteLock, 2000, 300, mclock) {
       @Override
-      protected void logWarning(long lockHeldTime, long suppressed) {
+      protected void logWarning(long lockHeldTime, SuppressedSnapshot stats) {
         wlogged.incrementAndGet();
-        wsuppresed.set(suppressed);
+        wsuppresed.set(stats.getSuppressedCount());
       }
     };
 

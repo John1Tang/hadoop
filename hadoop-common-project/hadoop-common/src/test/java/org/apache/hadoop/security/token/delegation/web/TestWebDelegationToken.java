@@ -22,6 +22,7 @@ import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.minikdc.MiniKdc;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authentication.KerberosTestUtils;
 import org.apache.hadoop.security.authentication.client.AuthenticationException;
 import org.apache.hadoop.security.authentication.client.KerberosAuthenticator;
 import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
@@ -32,7 +33,6 @@ import org.apache.hadoop.security.authentication.server.PseudoAuthenticationHand
 import org.apache.hadoop.security.authentication.util.KerberosUtil;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager;
 import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.log4j.Level;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
 import org.eclipse.jetty.servlet.ServletContextHandler;
@@ -42,6 +42,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.eclipse.jetty.servlet.FilterHolder;
 import org.eclipse.jetty.servlet.ServletHolder;
+import org.slf4j.event.Level;
 
 import javax.security.auth.Subject;
 import javax.security.auth.kerberos.KerberosPrincipal;
@@ -364,7 +365,7 @@ public class TestWebDelegationToken {
         aUrl.getDelegationToken(nonAuthURL, token, FOO_USER);
         Assert.fail();
       } catch (Exception ex) {
-        Assert.assertTrue(ex.getMessage().contains("401"));
+        Assert.assertTrue(ex.getCause().getMessage().contains("401"));
       }
 
       aUrl.getDelegationToken(authURL, token, FOO_USER);
@@ -743,12 +744,6 @@ public class TestWebDelegationToken {
       final boolean doAs) throws Exception {
     final String doAsUser = doAs ? OK_USER : null;
 
-    // setting hadoop security to kerberos
-    org.apache.hadoop.conf.Configuration conf =
-        new org.apache.hadoop.conf.Configuration();
-    conf.set("hadoop.security.authentication", "kerberos");
-    UserGroupInformation.setConfiguration(conf);
-
     File testDir = new File("target/" + UUID.randomUUID().toString());
     Assert.assertTrue(testDir.mkdirs());
     MiniKdc kdc = new MiniKdc(MiniKdc.createConf(), testDir);
@@ -759,6 +754,10 @@ public class TestWebDelegationToken {
     context.addFilter(new FilterHolder(KDTAFilter.class), "/*",
         EnumSet.of(DispatcherType.REQUEST));
     context.addServlet(new ServletHolder(UserServlet.class), "/bar");
+    org.apache.hadoop.conf.Configuration conf =
+        new org.apache.hadoop.conf.Configuration();
+    conf.set("hadoop.security.authentication", "kerberos");
+    conf.set("java.security.krb5.realm", KerberosTestUtils.getRealm());
     try {
       kdc.start();
       File keytabFile = new File(testDir, "test.keytab");
@@ -776,7 +775,7 @@ public class TestWebDelegationToken {
         aUrl.getDelegationToken(url, token, FOO_USER, doAsUser);
         Assert.fail();
       } catch (AuthenticationException ex) {
-        Assert.assertTrue(ex.getMessage().contains("GSSException"));
+        Assert.assertTrue(ex.getCause().getMessage().contains("GSSException"));
       }
 
       doAsKerberosUser("client", keytabFile.getAbsolutePath(),

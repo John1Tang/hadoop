@@ -105,9 +105,7 @@ public class S3AScaleTestBase extends AbstractS3ATestBase {
    * @return the configuration.
    */
   private synchronized Configuration demandCreateConfiguration() {
-    if (conf == null) {
-      conf = createScaleConfiguration();
-    }
+    conf = createScaleConfiguration();
     return conf;
   }
 
@@ -126,13 +124,17 @@ public class S3AScaleTestBase extends AbstractS3ATestBase {
    * @return a configuration with which to create FS instances
    */
   protected Configuration createScaleConfiguration() {
-    return new Configuration();
+    return super.createConfiguration();
   }
 
   protected Path getTestPath() {
     return testPath;
   }
 
+  /**
+   * Get the configured operation count.
+   * @return the number of times to perform the operation being tested
+   */
   protected long getOperationCount() {
     return getConf().getLong(KEY_OPERATION_COUNT, DEFAULT_OPERATION_COUNT);
   }

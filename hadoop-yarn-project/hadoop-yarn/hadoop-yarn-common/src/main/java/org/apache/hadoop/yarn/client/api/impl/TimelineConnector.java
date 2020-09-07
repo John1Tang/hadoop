@@ -34,8 +34,10 @@ import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLSocketFactory;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.security.authentication.server.KerberosAuthenticationHandler;
+import org.apache.hadoop.security.authentication.server.PseudoAuthenticationHandler;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -73,11 +75,12 @@ import com.sun.jersey.client.urlconnection.URLConnectionClientHandler;
 public class TimelineConnector extends AbstractService {
 
   private static final Joiner JOINER = Joiner.on("");
-  private static final Log LOG = LogFactory.getLog(TimelineConnector.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TimelineConnector.class);
   public final static int DEFAULT_SOCKET_TIMEOUT = 1 * 60 * 1000; // 1 minute
 
   private SSLFactory sslFactory;
-  private Client client;
+  Client client;
   private ConnectionConfigurator connConfigurator;
   private DelegationTokenAuthenticator authenticator;
   private DelegationTokenAuthenticatedURL.Token token;
@@ -103,10 +106,19 @@ public class TimelineConnector extends AbstractService {
     ClientConfig cc = new DefaultClientConfig();
     cc.getClasses().add(YarnJacksonJaxbJsonProvider.class);
 
-    sslFactory = getSSLFactory(conf);
-    connConfigurator = getConnConfigurator(sslFactory);
-
-    if (UserGroupInformation.isSecurityEnabled()) {
+    if (YarnConfiguration.useHttps(conf)) {
+      // If https is chosen, configures SSL client.
+      sslFactory = getSSLFactory(conf);
+      connConfigurator = getConnConfigurator(sslFactory);
+    } else {
+      connConfigurator = DEFAULT_TIMEOUT_CONN_CONFIGURATOR;
+    }
+    String defaultAuth = UserGroupInformation.isSecurityEnabled() ?
+            KerberosAuthenticationHandler.TYPE :
+            PseudoAuthenticationHandler.TYPE;
+    String authType = conf.get(YarnConfiguration.TIMELINE_HTTP_AUTH_TYPE,
+            defaultAuth);
+    if (authType.equals(KerberosAuthenticationHandler.TYPE)) {
       authenticator = new KerberosDelegationTokenAuthenticator();
     } else {
       authenticator = new PseudoDelegationTokenAuthenticator();
@@ -194,6 +206,9 @@ public class TimelineConnector extends AbstractService {
   }
 
   protected void serviceStop() {
+    if (this.client != null) {
+      this.client.destroy();
+    }
     if (this.sslFactory != null) {
       this.sslFactory.destroy();
     }

@@ -25,6 +25,7 @@ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.util.StripedBlockUtil;
+import org.apache.hadoop.hdfs.util.StripedBlockUtil.BlockReadStats;
 import org.apache.hadoop.io.ByteBufferPool;
 import org.apache.hadoop.io.ElasticByteBufferPool;
 import org.apache.hadoop.io.erasurecode.CodecUtil;
@@ -39,8 +40,6 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.BitSet;
 import java.util.concurrent.CompletionService;
-import java.util.concurrent.ExecutorCompletionService;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -110,7 +109,7 @@ abstract class StripedReconstructor {
   // position in striped internal block
   private long positionInBlock;
   private StripedReader stripedReader;
-  private ThreadPoolExecutor stripedReadPool;
+  private ErasureCodingWorker erasureCodingWorker;
   private final CachingStrategy cachingStrategy;
   private long maxTargetLength = 0L;
   private final BitSet liveBitSet;
@@ -122,7 +121,7 @@ abstract class StripedReconstructor {
 
   StripedReconstructor(ErasureCodingWorker worker,
       StripedReconstructionInfo stripedReconInfo) {
-    this.stripedReadPool = worker.getStripedReadPool();
+    this.erasureCodingWorker = worker;
     this.datanode = worker.getDatanode();
     this.conf = worker.getConf();
     this.ecPolicy = stripedReconInfo.getEcPolicy();
@@ -133,7 +132,6 @@ abstract class StripedReconstructor {
     }
     blockGroup = stripedReconInfo.getBlockGroup();
     stripedReader = new StripedReader(this, datanode, conf, stripedReconInfo);
-
     cachingStrategy = CachingStrategy.newDefaultStrategy();
 
     positionInBlock = 0L;
@@ -225,12 +223,19 @@ abstract class StripedReconstructor {
     return cachingStrategy;
   }
 
-  CompletionService<Void> createReadService() {
-    return new ExecutorCompletionService<>(stripedReadPool);
+  CompletionService<BlockReadStats> createReadService() {
+    return erasureCodingWorker.createReadService();
   }
 
   ExtendedBlock getBlockGroup() {
     return blockGroup;
+  }
+
+  /**
+   * Get the xmits that _will_ be used for this reconstruction task.
+   */
+  int getXmits() {
+    return stripedReader.getXmits();
   }
 
   BitSet getLiveBitSet() {
@@ -253,6 +258,12 @@ abstract class StripedReconstructor {
     return decoder;
   }
 
+  void cleanup() {
+    if (decoder != null) {
+      decoder.release();
+    }
+  }
+
   StripedReader getStripedReader() {
     return stripedReader;
   }
@@ -263,5 +274,9 @@ abstract class StripedReconstructor {
 
   DataNode getDatanode() {
     return datanode;
+  }
+
+  public ErasureCodingWorker getErasureCodingWorker() {
+    return erasureCodingWorker;
   }
 }

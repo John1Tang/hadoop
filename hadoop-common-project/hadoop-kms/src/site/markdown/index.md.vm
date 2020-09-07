@@ -80,6 +80,8 @@ The password file is looked up in the Hadoop's configuration directory via the c
 
 NOTE: You need to restart the KMS for the configuration changes to take effect.
 
+NOTE: The KMS server can choose any `KeyProvider` implementation as the backing provider. The example here uses a JavaKeyStoreProvider, which should only be used for experimental purposes and never be used in production. For detailed usage and caveats of JavaKeyStoreProvider, please see [Keystore Passwords section of the Credential Provider API](../hadoop-project-dist/hadoop-common/CredentialProviderAPI.html#Keystore_Passwords).
+
 $H3 KMS HTTP Configuration
 
 KMS pre-configures the HTTP port to 9600.
@@ -305,7 +307,7 @@ Configure `etc/hadoop/ssl-server.xml` with proper values, for example:
 ```
 
 The SSL passwords can be secured by a credential provider. See
-[Credential Provider API](../../../hadoop-project-dist/hadoop-common/CredentialProviderAPI.html).
+[Credential Provider API](../hadoop-project-dist/hadoop-common/CredentialProviderAPI.html).
 
 You need to create an SSL certificate for the KMS. As the `kms` Unix user, using the Java `keytool` command to create the SSL certificate:
 
@@ -506,7 +508,7 @@ $H5 Key ACLs
 KMS supports access control for all non-read operations at the Key level. All Key Access operations are classified as :
 
 * MANAGEMENT - createKey, deleteKey, rolloverNewVersion
-* GENERATE_EEK - generateEncryptedKey, reencryptEncryptedKey, warmUpEncryptedKeys
+* GENERATE_EEK - generateEncryptedKey, reencryptEncryptedKey, reencryptEncryptedKeys, warmUpEncryptedKeys
 * DECRYPT_EEK - decryptEncryptedKey
 * READ - getKeyVersion, getKeyVersions, getMetadata, getKeysMetadata, getCurrentKey
 * ALL - all of the above
@@ -714,7 +716,7 @@ $H4 HTTP Kerberos Principals Configuration
 
 When KMS instances are behind a load-balancer or VIP, clients will use the hostname of the VIP. For Kerberos SPNEGO authentication, the hostname of the URL is used to construct the Kerberos service name of the server, `HTTP/#HOSTNAME#`. This means that all KMS instances must have a Kerberos service name with the load-balancer or VIP hostname.
 
-In order to be able to access directly a specific KMS instance, the KMS instance must also have Keberos service name with its own hostname. This is required for monitoring and admin purposes.
+In order to be able to access directly a specific KMS instance, the KMS instance must also have Kerberos service name with its own hostname. This is required for monitoring and admin purposes.
 
 Both Kerberos service principal credentials (for the load-balancer/VIP hostname and for the actual KMS instance hostname) must be in the keytab file configured for authentication. And the principal name specified in the configuration must be '\*'. For example:
 
@@ -982,6 +984,64 @@ This is usually useful after a [Rollover](#Rollover_Key) of an encryption key. R
           "material"          : "<material>",    //base64
       }
     }
+
+$H4 Batch Re-encrypt Encrypted Keys With The Latest KeyVersion
+
+Batched version of the above re-encrypt Encrypted Key. This command takes a list of previously generated encrypted key, and re-encrypts them using the latest KeyVersion encryption key in the KeyProvider, and return the re-encrypted encrypted keys in the same sequence. For each encrypted key, if the latest KeyVersion is the same as the one used to generate the encrypted key, no action is taken and the same encrypted key is returned.
+
+This is usually useful after a [Rollover](#Rollover_Key) of an encryption key. Re-encrypting the encrypted key will allow it to be encrypted using the latest version of the encryption key, but still with the same key material and initialization vector.
+
+All Encrypted keys for a batch request must be under the same encryption key name, but could be potentially under different versions of the encryption key.
+
+*REQUEST:*
+
+    POST http://HOST:PORT/kms/v1/key/<key-name>/_reencryptbatch
+    Content-Type: application/json
+
+    [
+      {
+        "versionName"         : "<encryptionVersionName>",
+        "iv"                  : "<iv>",            //base64
+        "encryptedKeyVersion" : {
+            "versionName"       : "EEK",
+            "material"          : "<material>",    //base64
+        }
+      },
+      {
+        "versionName"         : "<encryptionVersionName>",
+        "iv"                  : "<iv>",            //base64
+        "encryptedKeyVersion" : {
+            "versionName"       : "EEK",
+            "material"          : "<material>",    //base64
+        }
+      },
+      ...
+    ]
+
+*RESPONSE:*
+
+    200 OK
+    Content-Type: application/json
+
+    [
+      {
+        "versionName"         : "<encryptionVersionName>",
+        "iv"                  : "<iv>",            //base64
+        "encryptedKeyVersion" : {
+            "versionName"       : "EEK",
+            "material"          : "<material>",    //base64
+        }
+      },
+      {
+        "versionName"         : "<encryptionVersionName>",
+        "iv"                  : "<iv>",            //base64
+        "encryptedKeyVersion" : {
+            "versionName"       : "EEK",
+            "material"          : "<material>",    //base64
+        }
+      },
+      ...
+    ]
 
 $H4 Get Key Version
 

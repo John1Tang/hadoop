@@ -20,9 +20,8 @@ package org.apache.hadoop.security.token.delegation.web;
 import java.io.IOException;
 import java.io.Writer;
 import java.text.MessageFormat;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -48,6 +47,8 @@ import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenIdenti
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager;
 import org.apache.hadoop.util.HttpExceptionUtils;
 import org.apache.hadoop.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
@@ -57,7 +58,7 @@ import com.google.common.annotations.VisibleForTesting;
 /**
  * An {@link AuthenticationHandler} that implements Kerberos SPNEGO mechanism
  * for HTTP and supports Delegation Token functionality.
- * <p/>
+ * <p>
  * In addition to the wrapped {@link AuthenticationHandler} configuration
  * properties, this handler supports the following properties prefixed
  * with the type of the wrapped <code>AuthenticationHandler</code>:
@@ -79,6 +80,8 @@ import com.google.common.annotations.VisibleForTesting;
 @InterfaceStability.Evolving
 public abstract class DelegationTokenAuthenticationHandler
     implements AuthenticationHandler {
+  private static final Logger LOG =
+      LoggerFactory.getLogger(DelegationTokenAuthenticationHandler.class);
 
   protected static final String TYPE_POSTFIX = "-dt";
 
@@ -131,7 +134,7 @@ public abstract class DelegationTokenAuthenticationHandler
   /**
    * Sets an external <code>DelegationTokenSecretManager</code> instance to
    * manage creation and verification of Delegation Tokens.
-   * <p/>
+   * <p>
    * This is useful for use cases where secrets must be shared across multiple
    * services.
    *
@@ -220,6 +223,7 @@ public abstract class DelegationTokenAuthenticationHandler
       HttpServletRequest request, HttpServletResponse response)
       throws IOException, AuthenticationException {
     boolean requestContinues = true;
+    LOG.trace("Processing operation for req=({}), token: {}", request, token);
     String op = ServletUtils.getParameter(request,
         KerberosDelegationTokenAuthenticator.OP_PARAM);
     op = (op != null) ? StringUtils.toUpperCase(op) : null;
@@ -232,6 +236,7 @@ public abstract class DelegationTokenAuthenticationHandler
         if (dtOp.requiresKerberosCredentials() && token == null) {
           // Don't authenticate via DT for DT ops.
           token = authHandler.authenticate(request, response);
+          LOG.trace("Got token: {}.", token);
           if (token == null) {
             requestContinues = false;
             doManagement = false;
@@ -266,8 +271,11 @@ public abstract class DelegationTokenAuthenticationHandler
               }
               String renewer = ServletUtils.getParameter(request,
                   KerberosDelegationTokenAuthenticator.RENEWER_PARAM);
+              String service = ServletUtils.getParameter(request,
+                  KerberosDelegationTokenAuthenticator.SERVICE_PARAM);
               try {
-                Token<?> dToken = tokenManager.createToken(requestUgi, renewer);
+                Token<?> dToken = tokenManager.createToken(requestUgi, renewer,
+                    service);
                 map = delegationTokenToJSON(dToken);
               } catch (IOException ex) {
                 throw new AuthenticationException(ex.toString(), ex);
@@ -292,8 +300,7 @@ public abstract class DelegationTokenAuthenticationHandler
                   dt.decodeFromUrlString(tokenToRenew);
                   long expirationTime = tokenManager.renewToken(dt,
                       requestUgi.getShortUserName());
-                  map = new HashMap();
-                  map.put("long", expirationTime);
+                  map = Collections.singletonMap("long", expirationTime);
                 } catch (IOException ex) {
                   throw new AuthenticationException(ex.toString(), ex);
                 }
@@ -349,13 +356,11 @@ public abstract class DelegationTokenAuthenticationHandler
 
   @SuppressWarnings("unchecked")
   private static Map delegationTokenToJSON(Token token) throws IOException {
-    Map json = new LinkedHashMap();
-    json.put(
+    Map json = Collections.singletonMap(
         KerberosDelegationTokenAuthenticator.DELEGATION_TOKEN_URL_STRING_JSON,
         token.encodeToUrlString());
-    Map response = new LinkedHashMap();
-    response.put(KerberosDelegationTokenAuthenticator.DELEGATION_TOKEN_JSON,
-        json);
+    Map response = Collections.singletonMap(
+        KerberosDelegationTokenAuthenticator.DELEGATION_TOKEN_JSON, json);
     return response;
   }
 
@@ -380,6 +385,7 @@ public abstract class DelegationTokenAuthenticationHandler
     AuthenticationToken token;
     String delegationParam = getDelegationToken(request);
     if (delegationParam != null) {
+      LOG.debug("Authenticating with dt param: {}", delegationParam);
       try {
         Token<AbstractDelegationTokenIdentifier> dt = new Token();
         dt.decodeFromUrlString(delegationParam);
@@ -397,6 +403,7 @@ public abstract class DelegationTokenAuthenticationHandler
             HttpServletResponse.SC_FORBIDDEN, new AuthenticationException(ex));
       }
     } else {
+      LOG.debug("Falling back to {} (req={})", authHandler.getClass(), request);
       token = authHandler.authenticate(request, response);
     }
     return token;

@@ -18,8 +18,25 @@
 
 import Ember from 'ember';
 import Converter from 'yarn-ui/utils/converter';
+import ColumnDef from 'em-table/utils/column-definition';
+import TableDefinition from 'em-table/utils/table-definition';
 
 export default Ember.Component.extend({
+  tableDefinition: TableDefinition.create({
+    searchType: 'manual',
+  }),
+  graphDrawn: false,
+  userInfo: null,
+
+  actions: {
+    changeViewType(param) {
+      this.sendAction("changeViewType", param);
+      if (this.get('attemptModel')) {
+        this.setAttemptsGridColumnsAndRows();
+      }
+    }
+  },
+
   canvas: {
     svg: undefined,
     h: 0,
@@ -29,8 +46,12 @@ export default Ember.Component.extend({
 
   clusterMetrics: undefined,
   modelArr: [],
+  containerIdArr: [],
   colors: d3.scale.category10().range(),
   _selected: undefined,
+  gridColumns: [],
+  gridRows: [],
+  serviceName: undefined,
 
   selected: function() {
     return this._selected;
@@ -225,37 +246,51 @@ export default Ember.Component.extend({
   },
 
   didInsertElement: function() {
-    // init tooltip
-    this.initTooltip();
-    this.modelArr = [];
-
     // init model
+    this.modelArr = [];
+    this.containerIdArr = [];
+
     if (this.get("rmModel")) {
       this.get("rmModel").forEach(function(o) {
         if(!this.modelArr.contains(o)) {
           this.modelArr.push(o);
+          this.containerIdArr.push(o.id);
         }
       }.bind(this));
     }
 
     if (this.get("tsModel")) {
       this.get("tsModel").forEach(function(o) {
-        if(!this.modelArr.contains(o)) {
+        if(!this.containerIdArr.contains(o.id)) {
           this.modelArr.push(o);
         }
       }.bind(this));
     }
 
-    if(this.modelArr.length === 0) {
+    if (this.modelArr.length === 0) {
       return;
     }
 
     this.modelArr.sort(function(a, b) {
       var tsA = a.get("startTs");
       var tsB = b.get("startTs");
-
       return tsA - tsB;
     });
+
+    if (this.get('attemptModel')) {
+      this.setAttemptsGridColumnsAndRows();
+    } else {
+      this.setContainersGridColumnsAndRows();
+    }
+  },
+
+  didUpdate: function() {
+    if (this.get("viewType") === "grid" || this.graphDrawn) {
+      return;
+    }
+
+    this.initTooltip();
+
     var begin = 0;
     if (this.modelArr.length > 0) {
       begin = this.modelArr[0].get("startTs");
@@ -276,5 +311,236 @@ export default Ember.Component.extend({
     if (this.modelArr.length > 0) {
       this.setSelected(this.modelArr[0]);
     }
+
+    this.graphDrawn = true;
   },
+
+  setAttemptsGridColumnsAndRows: function() {
+    var self = this;
+    var columns = [];
+    var serviceName = this.get('serviceName');
+
+    columns.push({
+      id: 'id',
+      headerTitle: 'Attempt ID',
+      contentPath: 'id',
+      cellComponentName: 'em-table-linked-cell',
+      minWidth: '300px',
+      getCellContent: function(row) {
+        var attemptId = row.get('id');
+        var query = 'viewType=' + self.get("viewType");
+        if (serviceName) {
+          query += '&service=' + serviceName;
+        }
+        return {
+          displayText: attemptId,
+          href: `#/yarn-app-attempt/${attemptId}?${query}`
+        };
+      }
+    }, {
+      id: 'attemptStartedTime',
+      headerTitle: 'Started Time',
+      contentPath: 'attemptStartedTime'
+    }, {
+      id: 'finishedTime',
+      headerTitle: 'Finished Time',
+      contentPath: 'finishedTime',
+      getCellContent: function(row) {
+        if (row.get('finishedTs')) {
+          return row.get('finishedTime');
+        }
+        return 'N/A';
+      }
+    }, {
+      id: 'elapsedTime',
+      headerTitle: 'Elapsed Time',
+      contentPath: 'elapsedTime'
+    }, {
+      id: 'appMasterContainerId',
+      headerTitle: 'AM Container ID',
+      contentPath: 'appMasterContainerId',
+      minWidth: '350px'
+    }, {
+      id: 'amNodeId',
+      headerTitle: 'AM Node ID',
+      contentPath: 'amNodeId'
+    }, {
+      id: 'attemptState',
+      headerTitle: 'State',
+      contentPath: 'attemptState',
+      getCellContent: function(row) {
+        var state = row.get('attemptState');
+        if (state) {
+          return state;
+        } else {
+          return 'N/A';
+        }
+      }
+    }, {
+      id: 'exposedPorts',
+      headerTitle: 'Exposed Ports',
+      contentPath: 'exposedPorts',
+      getCellContent: function(row) {
+        var ports = row.get('exposedPorts');
+        if (ports) {
+          return ports;
+        } else {
+          return 'N/A';
+        }
+      }
+    }, {
+      id: 'nodeHttpAddress',
+      headerTitle: 'NodeManager Web UI',
+      contentPath: 'nodeHttpAddress',
+      cellComponentName: 'em-table-html-cell',
+      getCellContent: function(row) {
+        var address = self.checkHttpProtocol(row.get('nodeHttpAddress'));
+        var link = row.get('masterNodeURL');
+        if (address) {
+          return `<a href="${link}">${address}</a>`;
+        } else {
+          return 'N/A';
+        }
+      }
+    }, {
+      id: 'logsLink',
+      headerTitle: 'Logs',
+      contentPath: 'logsLink',
+      cellComponentName: 'em-table-html-cell',
+      getCellContent: function(row) {
+        var containerLogUrl = row.get('appAttemptContainerLogsURL');
+        if (containerLogUrl) {
+          return `<a href="${containerLogUrl}">Link</a>`;
+        } else {
+          return 'N/A';
+        }
+      }
+    });
+
+    var gridCols = ColumnDef.make(columns);
+    this.set('gridColumns', gridCols);
+    this.set('gridRows', this.modelArr);
+  },
+
+  setContainersGridColumnsAndRows: function() {
+    var self = this;
+    var columns = [];
+
+    columns.push({
+      id: 'id',
+      headerTitle: 'Container ID',
+      contentPath: 'id',
+      cellComponentName: 'em-table-html-cell',
+      minWidth: '350px',
+      getCellContent: function(row) {
+        var termLink = self.checkHttpProtocol(row.get('nodeHttpAddress'));
+        var containerId = row.get('id');
+        var requestedUser = self.get('requestedUser');
+        return `<a href="${termLink}/terminal/terminal.template?container=${containerId}&user.name=${requestedUser}" target="_blank">${containerId}</a>`;
+      }
+    }, {
+      id: 'startedTime',
+      headerTitle: 'Started Time',
+      contentPath: 'startedTime'
+    }, {
+      id: 'finishedTime',
+      headerTitle: 'Finished Time',
+      contentPath: 'finishedTime',
+      getCellContent: function(row) {
+        if (row.get('finishedTs')) {
+          return row.get('finishedTime');
+        }
+        return 'N/A';
+      }
+    }, {
+      id: 'elapsedTime',
+      headerTitle: 'Elapsed Time',
+      contentPath: 'elapsedTime'
+    }, {
+      id: 'priority',
+      headerTitle: 'Priority',
+      contentPath: 'priority'
+    }, {
+      id: 'containerExitStatus',
+      headerTitle: 'Exit Status',
+      contentPath: 'containerExitStatus',
+      getCellContent: function(row) {
+        var status = row.get('containerExitStatus');
+        if (status) {
+          return status;
+        } else {
+          return 'N/A';
+        }
+      }
+    }, {
+      id: 'containerState',
+      headerTitle: 'State',
+      contentPath: 'containerState',
+      getCellContent: function(row) {
+        var state = row.get('containerState');
+        if (state) {
+          return state;
+        } else {
+          return 'N/A';
+        }
+      }
+    }, {
+      id: 'logUrl',
+      headerTitle: 'Logs',
+      contentPath: 'logUrl',
+      cellComponentName: 'em-table-html-cell',
+      getCellContent: function(row) {
+        var containerLogUrl = row.get('appAttemptContainerLogsURL');
+        if (containerLogUrl) {
+          return `<a href="${containerLogUrl}">Link</a>`;
+        } else {
+          return 'N/A';
+        }
+      }
+    }, {
+      id: 'exposedPorts',
+      headerTitle: 'Exposed Ports',
+      contentPath: 'exposedPorts',
+      getCellContent: function(row) {
+        var ports = row.get('exposedPorts');
+        if (ports) {
+          return ports;
+        } else {
+          return 'N/A';
+        }
+      }
+    }, {
+      id: 'nodeHttpAddress',
+      headerTitle: 'Node Manager UI',
+      contentPath: 'nodeHttpAddress',
+      cellComponentName: 'em-table-html-cell',
+      getCellContent: function(row) {
+        var address = self.checkHttpProtocol(row.get('nodeHttpAddress'));
+        var link = row.get('masterNodeURL');
+        if (address) {
+          return `<a href="${link}">${address}</a>`;
+        } else {
+          return 'N/A';
+        }
+      }
+    });
+
+    var gridCols = ColumnDef.make(columns);
+    this.set('gridColumns', gridCols);
+    this.set('gridRows', this.modelArr);
+  },
+
+  checkHttpProtocol: function(prop) {
+    if (prop && prop.indexOf('://') < 0) {
+      prop = 'http://' + prop;
+    }
+    return prop;
+  },
+
+  requestedUser: function() {
+    if (this.get('userInfo')) {
+      return this.get('userInfo.requestedUser');
+    }
+    return '';
+  }.property('userInfo'),
 });

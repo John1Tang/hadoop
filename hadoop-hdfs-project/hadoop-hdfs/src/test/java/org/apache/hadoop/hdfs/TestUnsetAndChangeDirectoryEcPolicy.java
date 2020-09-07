@@ -17,13 +17,13 @@
  */
 package org.apache.hadoop.hdfs;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.protocol.SystemErasureCodingPolicies;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.server.namenode.ErasureCodingPolicyManager;
+import org.apache.hadoop.hdfs.protocol.NoECPolicySetException;
 import org.apache.hadoop.io.erasurecode.CodecUtil;
 import org.apache.hadoop.io.erasurecode.ErasureCodeNative;
 import org.apache.hadoop.io.erasurecode.rawcoder.NativeRSRawErasureCoderFactory;
@@ -45,8 +45,8 @@ import static org.junit.Assert.fail;
  */
 public class TestUnsetAndChangeDirectoryEcPolicy {
 
-  public static final Log LOG =
-      LogFactory.getLog(TestUnsetAndChangeDirectoryEcPolicy.class);
+  public static final Logger LOG =
+      LoggerFactory.getLogger(TestUnsetAndChangeDirectoryEcPolicy.class);
 
   private MiniDFSCluster cluster;
   private Configuration conf = new Configuration();
@@ -68,14 +68,14 @@ public class TestUnsetAndChangeDirectoryEcPolicy {
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_MAX_STREAMS_KEY, 0);
     if (ErasureCodeNative.isNativeCodeLoaded()) {
       conf.set(
-          CodecUtil.IO_ERASURECODE_CODEC_RS_RAWCODER_KEY,
-          NativeRSRawErasureCoderFactory.class.getCanonicalName());
+          CodecUtil.IO_ERASURECODE_CODEC_RS_RAWCODERS_KEY,
+          NativeRSRawErasureCoderFactory.CODER_NAME);
     }
-    DFSTestUtil.enableAllECPolicies(conf);
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(
         dataBlocks + parityBlocks).build();
     cluster.waitActive();
     fs = cluster.getFileSystem();
+    DFSTestUtil.enableAllECPolicies(fs);
   }
 
   @After
@@ -99,7 +99,11 @@ public class TestUnsetAndChangeDirectoryEcPolicy {
 
     fs.mkdirs(dirPath);
     // Test unset a directory which has no EC policy
-    fs.unsetErasureCodingPolicy(dirPath);
+    try {
+      fs.unsetErasureCodingPolicy(dirPath);
+      fail();
+    } catch (NoECPolicySetException e) {
+    }
     // Set EC policy on directory
     fs.setErasureCodingPolicy(dirPath, ecPolicy.getName());
 
@@ -127,8 +131,8 @@ public class TestUnsetAndChangeDirectoryEcPolicy {
   }
 
   /*
-  * Test nested directory with different EC policy.
-  */
+   * Test nested directory with different EC policy.
+   */
   @Test
   public void testNestedEcPolicy() throws Exception {
     final int numBlocks = 1;
@@ -138,8 +142,8 @@ public class TestUnsetAndChangeDirectoryEcPolicy {
     final Path ec63FilePath = new Path(childDir, "ec_6_3_file");
     final Path ec32FilePath = new Path(childDir, "ec_3_2_file");
     final Path ec63FilePath2 = new Path(childDir, "ec_6_3_file_2");
-    final ErasureCodingPolicy ec32Policy = ErasureCodingPolicyManager
-        .getPolicyByID(HdfsConstants.RS_3_2_POLICY_ID);
+    final ErasureCodingPolicy ec32Policy = SystemErasureCodingPolicies
+        .getByID(SystemErasureCodingPolicies.RS_3_2_POLICY_ID);
 
     fs.mkdirs(parentDir);
     fs.setErasureCodingPolicy(parentDir, ecPolicy.getName());
@@ -200,7 +204,11 @@ public class TestUnsetAndChangeDirectoryEcPolicy {
     final Path replicateFilePath = new Path(rootPath, "rep_file");
 
     // Test unset root path which has no EC policy
-    fs.unsetErasureCodingPolicy(rootPath);
+    try {
+      fs.unsetErasureCodingPolicy(rootPath);
+      fail();
+    } catch (NoECPolicySetException e) {
+    }
     // Set EC policy on root path
     fs.setErasureCodingPolicy(rootPath, ecPolicy.getName());
     DFSTestUtil.createFile(fs, ecFilePath, fileLen, (short) 1, 0L);
@@ -236,10 +244,14 @@ public class TestUnsetAndChangeDirectoryEcPolicy {
     final Path rootPath = new Path("/");
     final Path ec63FilePath = new Path(rootPath, "ec_6_3_file");
     final Path ec32FilePath = new Path(rootPath, "ec_3_2_file");
-    final ErasureCodingPolicy ec32Policy = ErasureCodingPolicyManager
-        .getPolicyByID(HdfsConstants.RS_3_2_POLICY_ID);
+    final ErasureCodingPolicy ec32Policy = SystemErasureCodingPolicies
+        .getByID(SystemErasureCodingPolicies.RS_3_2_POLICY_ID);
 
-    fs.unsetErasureCodingPolicy(rootPath);
+    try {
+      fs.unsetErasureCodingPolicy(rootPath);
+      fail();
+    } catch (NoECPolicySetException e) {
+    }
     fs.setErasureCodingPolicy(rootPath, ecPolicy.getName());
     // Create RS(6,3) EC policy file
     DFSTestUtil.createFile(fs, ec63FilePath, fileLen, (short) 1, 0L);
@@ -362,5 +374,18 @@ public class TestUnsetAndChangeDirectoryEcPolicy {
       assertExceptionContains("Cannot unset an erasure coding policy on a file "
           + ecFilePath, e);
     }
+  }
+
+  /**
+   * Test unsetEcPolicy is persisted correctly in edit log.
+   */
+  @Test
+  public void testUnsetEcPolicyInEditLog() throws IOException {
+    fs.getClient().setErasureCodingPolicy("/", ecPolicy.getName());
+    Assert.assertEquals(ecPolicy, fs.getErasureCodingPolicy(new Path("/")));
+    fs.getClient().unsetErasureCodingPolicy("/");
+
+    cluster.restartNameNode(true);
+    Assert.assertNull(fs.getErasureCodingPolicy(new Path("/")));
   }
 }

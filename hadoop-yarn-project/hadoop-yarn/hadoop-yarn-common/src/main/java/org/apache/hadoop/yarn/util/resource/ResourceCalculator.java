@@ -21,6 +21,8 @@ import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.records.Resource;
 
+import java.util.Set;
+
 /**
  * A set of {@link Resource} comparison and manipulation interfaces.
  */
@@ -65,12 +67,44 @@ public abstract class ResourceCalculator {
     }
     return (a + (b - 1)) / b;
   }
+
+  public static int divideAndCeil(int a, float b) {
+    if (b == 0) {
+      return 0;
+    }
+    return (int) Math.ceil(a / b);
+  }
   
   public static long divideAndCeil(long a, long b) {
     if (b == 0) {
       return 0;
     }
     return (a + (b - 1)) / b;
+  }
+
+  public static long divideAndCeil(long a, float b) {
+    if (b == 0) {
+      return 0;
+    }
+    return (long) Math.ceil(a/b);
+  }
+
+  /**
+   * Divides lhs by rhs.
+   * If both lhs and rhs are having a value of 0, then we return 0.
+   * This is to avoid division by zero and return NaN as a result.
+   * If lhs is zero but rhs is not, Float.infinity will be returned
+   * as the result.
+   * @param lhs
+   * @param rhs
+   * @return
+   */
+  public static float divideSafelyAsFloat(long lhs, long rhs) {
+    if (lhs == 0 && rhs == 0) {
+      return 0;
+    } else {
+      return (float) lhs / (float) rhs;
+    }
   }
 
   public static int roundUp(int a, int b) {
@@ -111,7 +145,19 @@ public abstract class ResourceCalculator {
    */
   public abstract Resource multiplyAndNormalizeUp(
       Resource r, double by, Resource stepFactor);
-  
+
+  /**
+   * Multiply resource <code>r</code> by factor <code>by</code>
+   * and normalize up using step-factor <code>stepFactor</code>.
+   *
+   * @param r resource to be multiplied
+   * @param by multiplier array for all resource types
+   * @param stepFactor factor by which to normalize up
+   * @return resulting normalized resource
+   */
+  public abstract Resource multiplyAndNormalizeUp(
+      Resource r, double[] by, Resource stepFactor);
+
   /**
    * Multiply resource <code>r</code> by factor <code>by</code> 
    * and normalize down using step-factor <code>stepFactor</code>.
@@ -123,7 +169,7 @@ public abstract class ResourceCalculator {
    */
   public abstract Resource multiplyAndNormalizeDown(
       Resource r, double by, Resource stepFactor);
-  
+
   /**
    * Normalize resource <code>r</code> given the base 
    * <code>minimumResource</code> and verify against max allowed
@@ -136,9 +182,7 @@ public abstract class ResourceCalculator {
    * @return normalized resource
    */
   public abstract Resource normalize(Resource r, Resource minimumResource,
-                                     Resource maximumResource, 
-                                     Resource stepFactor);
-
+      Resource maximumResource, Resource stepFactor);
 
   /**
    * Round-up resource <code>r</code> given factor <code>stepFactor</code>.
@@ -198,10 +242,59 @@ public abstract class ResourceCalculator {
    * @return resultant resource
    */
   public abstract Resource divideAndCeil(Resource numerator, int denominator);
+
+  /**
+   * Divide-and-ceil <code>numerator</code> by <code>denominator</code>.
+   *
+   * @param numerator numerator resource
+   * @param denominator denominator
+   * @return resultant resource
+   */
+  public abstract Resource divideAndCeil(Resource numerator, float denominator);
   
   /**
    * Check if a smaller resource can be contained by bigger resource.
    */
-  public abstract boolean fitsIn(Resource cluster,
-      Resource smaller, Resource bigger);
+  public abstract boolean fitsIn(Resource smaller, Resource bigger);
+
+  /**
+   * Check if resource has any major resource types (which are all NodeManagers
+   * included) a zero value or negative value.
+   *
+   * @param resource resource
+   * @return returns true if any resource is zero.
+   */
+  public abstract boolean isAnyMajorResourceZeroOrNegative(Resource resource);
+
+  /**
+   * Get resource <code>r</code>and normalize down using step-factor
+   * <code>stepFactor</code>.
+   *
+   * @param r
+   *          resource to be multiplied
+   * @param stepFactor
+   *          factor by which to normalize down
+   * @return resulting normalized resource
+   */
+  public abstract Resource normalizeDown(Resource r, Resource stepFactor);
+
+  /**
+   * Check if resource has any major resource types (which are all NodeManagers
+   * included) has a {@literal >} 0 value.
+   *
+   * @param resource resource
+   * @return returns true if any resource is {@literal >} 0
+   */
+  public abstract boolean isAnyMajorResourceAboveZero(Resource resource);
+
+  /**
+   * Get insufficient resource names via comparing required resource and
+   * capacity resource.
+   *
+   * @param required - required resource
+   * @param available - available resource
+   * @return insufficient resource names
+   */
+  public abstract Set<String> getInsufficientResourceNames(Resource required,
+      Resource available);
 }

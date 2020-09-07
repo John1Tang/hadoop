@@ -18,10 +18,10 @@
 
 export default {
   getApplicationLink: function(applicationId) {
-    return "#/yarn-app/" + applicationId;
+    return "#/yarn-app/" + applicationId + '/attempts';
   },
 
   getQueueLink: function(queueName) {
-    return '#/yarn-queue/' + queueName;
+    return '#/yarn-queue/' + queueName + '/info';
   }
 };

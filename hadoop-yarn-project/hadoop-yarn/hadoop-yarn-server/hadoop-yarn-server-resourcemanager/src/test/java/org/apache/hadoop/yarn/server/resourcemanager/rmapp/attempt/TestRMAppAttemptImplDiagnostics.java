@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt;
 
-import org.apache.commons.lang.RandomStringUtils;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -26,6 +26,7 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
+import org.apache.hadoop.yarn.util.BoundedAppender;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -86,7 +87,7 @@ public class TestRMAppAttemptImplDiagnostics {
     appAttempt.appendDiagnostics(beyondLimit);
 
     final String truncated = String.format(
-        RMAppAttemptImpl.BoundedAppender.TRUNCATED_MESSAGES_TEMPLATE, 1024,
+        BoundedAppender.TRUNCATED_MESSAGES_TEMPLATE, 1024,
         1025, beyondLimit.substring(1));
 
     assertEquals("messages beyond limit should be truncated", truncated,

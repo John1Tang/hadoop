@@ -29,8 +29,8 @@ import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -40,6 +40,7 @@ import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.MiniDFSCluster.DataNodeProperties;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
@@ -48,6 +49,7 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.hdfs.server.namenode.SafeModeException;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.io.erasurecode.ECSchema;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -57,14 +59,14 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.google.common.base.Supplier;
+import java.util.function.Supplier;
 import com.google.common.collect.Lists;
 
 /**
  * Tests to verify safe mode correctness.
  */
 public class TestSafeMode {
-  public static final Log LOG = LogFactory.getLog(TestSafeMode.class);
+  public static final Logger LOG = LoggerFactory.getLogger(TestSafeMode.class);
   private static final Path TEST_PATH = new Path("/test");
   private static final int BLOCK_SIZE = 1024;
   private static final String NEWLINE = System.getProperty("line.separator");
@@ -199,11 +201,11 @@ public class TestSafeMode {
     final NameNode nn = cluster.getNameNode();
     
     String status = nn.getNamesystem().getSafemode();
-    assertEquals("Safe mode is ON. The reported blocks 0 needs additional " +
-        "14 blocks to reach the threshold 0.9990 of total blocks 15." + NEWLINE +
-        "The number of live datanodes 0 has reached the minimum number 0. " +
-        "Safe mode will be turned off automatically once the thresholds " +
-        "have been reached.", status);
+    assertEquals("Safe mode is ON. The reported blocks 0 needs additional "
+        + "14 blocks to reach the threshold 0.9990 of total blocks 15."
+        + NEWLINE + "The minimum number of live datanodes is not required. "
+        + "Safe mode will be turned off automatically once the thresholds have "
+        + "been reached.", status);
     assertFalse("Mis-replicated block queues should not be initialized " +
         "until threshold is crossed",
         NameNodeAdapter.safeModeInitializedReplQueues(nn));
@@ -216,8 +218,8 @@ public class TestSafeMode {
     GenericTestUtils.waitFor(new Supplier<Boolean>() {
       @Override
       public Boolean get() {
-        return getLongCounter("StorageBlockReportOps", getMetrics(NN_METRICS)) ==
-            cluster.getStoragesPerDatanode();
+        return getLongCounter("StorageBlockReportNumOps",
+            getMetrics(NN_METRICS)) == cluster.getStoragesPerDatanode();
       }
     }, 10, 10000);
 
@@ -463,6 +465,29 @@ public class TestSafeMode {
       myfs.access(file1, FsAction.WRITE);
       fail("The access call should have failed.");
     } catch (AccessControlException e) {
+      // expected
+    }
+
+    ECSchema toAddSchema = new ECSchema("testcodec", 3, 2);
+    ErasureCodingPolicy newPolicy =
+        new ErasureCodingPolicy(toAddSchema, 128 * 1024);
+    ErasureCodingPolicy[] policyArray =
+        new ErasureCodingPolicy[]{newPolicy};
+    try {
+      dfs.addErasureCodingPolicies(policyArray);
+      fail("AddErasureCodingPolicies should have failed.");
+    } catch (IOException ioe) {
+      GenericTestUtils.assertExceptionContains(
+          "Cannot add erasure coding policy", ioe);
+      // expected
+    }
+
+    try {
+      dfs.removeErasureCodingPolicy("testECName");
+      fail("RemoveErasureCodingPolicy should have failed.");
+    } catch (IOException ioe) {
+      GenericTestUtils.assertExceptionContains(
+          "Cannot remove erasure coding policy", ioe);
       // expected
     }
 

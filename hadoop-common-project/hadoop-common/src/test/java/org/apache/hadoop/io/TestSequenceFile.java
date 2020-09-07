@@ -21,8 +21,6 @@ package org.apache.hadoop.io;
 import java.io.*;
 import java.util.*;
 
-import org.apache.commons.logging.*;
-
 import org.apache.hadoop.fs.*;
 import org.apache.hadoop.io.SequenceFile.CompressionType;
 import org.apache.hadoop.io.SequenceFile.Metadata;
@@ -40,11 +38,14 @@ import static org.junit.Assert.fail;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /** Support for flat files of binary key/value pairs. */
 public class TestSequenceFile {
-  private static final Log LOG = LogFactory.getLog(TestSequenceFile.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestSequenceFile.class);
 
   private Configuration conf = new Configuration();
 
@@ -648,8 +649,9 @@ public class TestSequenceFile {
   @Test
   public void testRecursiveSeqFileCreate() throws IOException {
     FileSystem fs = FileSystem.getLocal(conf);
-    Path name = new Path(new Path(GenericTestUtils.getTempPath(
-        "recursiveCreateDir")), "file");
+    Path parentDir = new Path(GenericTestUtils.getTempPath(
+            "recursiveCreateDir"));
+    Path name = new Path(parentDir, "file");
     boolean createParent = false;
 
     try {
@@ -661,11 +663,16 @@ public class TestSequenceFile {
       // Expected
     }
 
-    createParent = true;
-    SequenceFile.createWriter(fs, conf, name, RandomDatum.class,
-        RandomDatum.class, 512, (short) 1, 4096, createParent,
-        CompressionType.NONE, null, new Metadata());
-    // should succeed, fails if exception thrown
+    try {
+      createParent = true;
+      SequenceFile.createWriter(fs, conf, name, RandomDatum.class,
+          RandomDatum.class, 512, (short) 1, 4096, createParent,
+          CompressionType.NONE, null, new Metadata());
+      // should succeed, fails if exception thrown
+    } finally {
+      fs.deleteOnExit(parentDir);
+      fs.close();
+    }
   }
 
   @Test

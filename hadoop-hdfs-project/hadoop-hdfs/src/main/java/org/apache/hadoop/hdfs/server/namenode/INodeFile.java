@@ -33,10 +33,11 @@ import java.util.List;
 import java.util.Set;
 
 import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
@@ -45,18 +46,20 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
-import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.FileDiff;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.FileDiffList;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.FileWithSnapshotFeature;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
+import org.apache.hadoop.hdfs.server.namenode.snapshot.DiffList;
+import org.apache.hadoop.hdfs.server.namenode.visitor.NamespaceVisitor;
 import org.apache.hadoop.hdfs.util.LongBitFormat;
+import org.apache.hadoop.util.StringUtils;
+import static org.apache.hadoop.io.erasurecode.ErasureCodeConstants.REPLICATION_POLICY_ID;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import org.apache.hadoop.util.StringUtils;
 
 /** I-node for closed file. */
 @InterfaceAudience.Private
@@ -185,27 +188,49 @@ public class INodeFile extends INodeWithAdditionalFields
      * Construct block layout redundancy based on the given BlockType,
      * replication factor and EC PolicyID.
      */
-    static long getBlockLayoutRedundancy(final BlockType blockType,
-        final Short replication, final Byte erasureCodingPolicyID) {
-      long layoutRedundancy = 0;
-      if (blockType == STRIPED) {
-        Preconditions.checkArgument(replication == null &&
-            erasureCodingPolicyID != null);
-        Preconditions.checkArgument(ErasureCodingPolicyManager
-            .getPolicyByID(erasureCodingPolicyID) != null,
-            "Could not find EC policy with ID 0x" + StringUtils
-                .byteToHexString(erasureCodingPolicyID));
+    static long getBlockLayoutRedundancy(BlockType blockType,
+        Short replication, Byte erasureCodingPolicyID) {
+      if (null == erasureCodingPolicyID) {
+        erasureCodingPolicyID = REPLICATION_POLICY_ID;
+      }
+      long layoutRedundancy = 0xFF & erasureCodingPolicyID;
+      switch (blockType) {
+      case STRIPED:
+        if (replication != null) {
+          throw new IllegalArgumentException(
+              "Illegal replication for STRIPED block type");
+        }
+        if (erasureCodingPolicyID == REPLICATION_POLICY_ID) {
+          throw new IllegalArgumentException(
+              "Illegal REPLICATION policy for STRIPED block type");
+        }
+        if (null == ErasureCodingPolicyManager.getInstance()
+            .getByID(erasureCodingPolicyID)) {
+          throw new IllegalArgumentException(String.format(
+                "Could not find EC policy with ID 0x%02x",
+                erasureCodingPolicyID));
+        }
+
+        // valid parameters for STRIPED
         layoutRedundancy |= BLOCK_TYPE_MASK_STRIPED;
-        // Following bitwise OR with signed byte erasureCodingPolicyID is safe
-        // as the PolicyID can never be in negative.
-        layoutRedundancy |= erasureCodingPolicyID;
-      } else {
-        Preconditions.checkArgument(replication != null &&
-            erasureCodingPolicyID == null);
-        Preconditions.checkArgument(replication >= 0 &&
-            replication <= MAX_REDUNDANCY,
-            "Invalid replication value " + replication);
+        break;
+      case CONTIGUOUS:
+        if (erasureCodingPolicyID != REPLICATION_POLICY_ID) {
+          throw new IllegalArgumentException(String.format(
+              "Illegal EC policy 0x%02x for CONTIGUOUS block type",
+              erasureCodingPolicyID));
+        }
+        if (null == replication ||
+            replication < 0 || replication > MAX_REDUNDANCY) {
+          throw new IllegalArgumentException("Invalid replication value "
+              + replication);
+        }
+
+        // valid parameters for CONTIGUOUS
         layoutRedundancy |= replication;
+        break;
+      default:
+        throw new IllegalArgumentException("Unknown blockType: " + blockType);
       }
       return layoutRedundancy;
     }
@@ -328,9 +353,11 @@ public class INodeFile extends INodeWithAdditionalFields
     for (int i = 0; i < blocks.length; i++) {
       final String err = checkBlockComplete(blocks, i, numCommittedAllowed,
           minReplication);
-      Preconditions.checkState(err == null,
-          "Unexpected block state: %s, file=%s (%s), blocks=%s (i=%s)",
-          err, this, getClass().getSimpleName(), Arrays.asList(blocks), i);
+      if(err != null) {
+        throw new IllegalStateException(String.format("Unexpected block state: " +
+            "%s, file=%s (%s), blocks=%s (i=%s)", err, this,
+            getClass().getSimpleName(), Arrays.asList(blocks), i));
+      }
     }
   }
 
@@ -348,17 +375,27 @@ public class INodeFile extends INodeWithAdditionalFields
     if (state == BlockUCState.COMPLETE) {
       return null;
     }
-    if (b.isStriped() || i < blocks.length - numCommittedAllowed) {
+    if (i < blocks.length - numCommittedAllowed) {
       return b + " is " + state + " but not COMPLETE";
     }
     if (state != BlockUCState.COMMITTED) {
       return b + " is " + state + " but neither COMPLETE nor COMMITTED";
     }
-    final int numExpectedLocations
-        = b.getUnderConstructionFeature().getNumExpectedLocations();
-    if (numExpectedLocations <= minReplication) {
-      return b + " is " + state + " but numExpectedLocations = "
-          + numExpectedLocations + " <= minReplication = " + minReplication;
+
+    if (b.isStriped()) {
+      BlockInfoStriped blkStriped = (BlockInfoStriped) b;
+      if (b.getUnderConstructionFeature().getNumExpectedLocations()
+          != blkStriped.getRealTotalBlockNum()) {
+        return b + " is a striped block in " + state + " with less then "
+            + "required number of blocks.";
+      }
+    } else {
+      final int numExpectedLocations =
+          b.getUnderConstructionFeature().getNumExpectedLocations();
+      if (numExpectedLocations <= minReplication) {
+        return b + " is " + state + " but numExpectedLocations = "
+            + numExpectedLocations + " <= minReplication = " + minReplication;
+      }
     }
     return null;
   }
@@ -513,9 +550,8 @@ public class INodeFile extends INodeWithAdditionalFields
       return max;
     }
 
-    ErasureCodingPolicy ecPolicy =
-        ErasureCodingPolicyManager.getPolicyByID(
-            getErasureCodingPolicyID());
+    ErasureCodingPolicy ecPolicy = ErasureCodingPolicyManager.getInstance()
+        .getByID(getErasureCodingPolicyID());
     Preconditions.checkNotNull(ecPolicy, "Could not find EC policy with ID 0x"
         + StringUtils.byteToHexString(getErasureCodingPolicyID()));
     return (short) (ecPolicy.getNumDataUnits() + ecPolicy.getNumParityUnits());
@@ -587,10 +623,8 @@ public class INodeFile extends INodeWithAdditionalFields
     setStoragePolicyID(storagePolicyId);
   }
 
-
   /**
-   * @return The ID of the erasure coding policy on the file. -1 represents no
-   *          EC policy.
+   * @return The ID of the erasure coding policy on the file.
    */
   @VisibleForTesting
   @Override
@@ -598,7 +632,7 @@ public class INodeFile extends INodeWithAdditionalFields
     if (isStriped()) {
       return HeaderFormat.getECPolicyID(header);
     }
-    return -1;
+    return REPLICATION_POLICY_ID;
   }
 
   /**
@@ -705,6 +739,13 @@ public class INodeFile extends INodeWithAdditionalFields
     this.blocks = BlockInfo.EMPTY_ARRAY;
   }
 
+  private void updateRemovedUnderConstructionFiles(
+      ReclaimContext reclaimContext) {
+    if (isUnderConstruction() && reclaimContext.removedUCFiles != null) {
+      reclaimContext.removedUCFiles.add(getId());
+    }
+  }
+
   @Override
   public void cleanSubtree(ReclaimContext reclaimContext,
       final int snapshot, int priorSnapshotId) {
@@ -713,6 +754,10 @@ public class INodeFile extends INodeWithAdditionalFields
       // TODO: avoid calling getStoragePolicyID
       sf.cleanFile(reclaimContext, this, snapshot, priorSnapshotId,
           getStoragePolicyID());
+      updateRemovedUnderConstructionFiles(reclaimContext);
+      if (sf.getDiffs().isEmpty()) {
+        this.removeFeature(sf);
+      }
     } else {
       if (snapshot == CURRENT_STATE_ID) {
         if (priorSnapshotId == NO_SNAPSHOT_ID) {
@@ -725,9 +770,7 @@ public class INodeFile extends INodeWithAdditionalFields
           // clean the 0-sized block if the file is UC
           if (uc != null) {
             uc.cleanZeroSizeBlock(this, reclaimContext.collectedBlocks);
-            if (reclaimContext.removedUCFiles != null) {
-              reclaimContext.removedUCFiles.add(getId());
-            }
+            updateRemovedUnderConstructionFiles(reclaimContext);
           }
         }
       }
@@ -746,9 +789,7 @@ public class INodeFile extends INodeWithAdditionalFields
           reclaimContext.collectedBlocks);
       sf.clearDiffs();
     }
-    if (isUnderConstruction() && reclaimContext.removedUCFiles != null) {
-      reclaimContext.removedUCFiles.add(getId());
-    }
+    updateRemovedUnderConstructionFiles(reclaimContext);
   }
 
   public void clearFile(ReclaimContext reclaimContext) {
@@ -839,13 +880,22 @@ public class INodeFile extends INodeWithAdditionalFields
   @Override
   public final ContentSummaryComputationContext computeContentSummary(
       int snapshotId, final ContentSummaryComputationContext summary) {
-    summary.nodeIncluded(this);
     final ContentCounts counts = summary.getCounts();
     counts.addContent(Content.FILE, 1);
     final long fileLen = computeFileSize(snapshotId);
     counts.addContent(Content.LENGTH, fileLen);
-    counts.addContent(Content.DISKSPACE, storagespaceConsumed(null)
-        .getStorageSpace());
+
+    FileWithSnapshotFeature sf = getFileWithSnapshotFeature();
+    if (sf == null) {
+      counts.addContent(Content.DISKSPACE,
+          storagespaceConsumed(null).getStorageSpace());
+    } else if (isStriped()) {
+      counts.addContent(Content.DISKSPACE,
+          storagespaceConsumedStriped().getStorageSpace());
+    } else {
+      long diskSpaceQuota = getDiskSpaceQuota(counts, sf, snapshotId);
+      counts.addContent(Content.DISKSPACE, diskSpaceQuota);
+    }
 
     if (getStoragePolicyID() != BLOCK_STORAGE_POLICY_ID_UNSPECIFIED){
       BlockStoragePolicy bsp = summary.getBlockStoragePolicySuite().
@@ -859,6 +909,34 @@ public class INodeFile extends INodeWithAdditionalFields
       }
     }
     return summary;
+  }
+
+  /**
+   * Compute disk space consumed by all the blocks in snapshots.
+   */
+  private long getDiskSpaceQuota(ContentCounts counts,
+      FileWithSnapshotFeature sf, int lastSnapshotId) {
+    FileDiffList fileDiffList = sf.getDiffs();
+    int last = fileDiffList.getLastSnapshotId();
+
+    if (lastSnapshotId == Snapshot.CURRENT_STATE_ID
+        || last == Snapshot.CURRENT_STATE_ID) {
+      return storagespaceConsumed(null).getStorageSpace();
+    }
+
+    final long ssDeltaNoReplication;
+    short replication;
+
+    if (last < lastSnapshotId) {
+      ssDeltaNoReplication = computeFileSize(true, false);
+      replication = getFileReplication();
+    } else {
+      int sid = fileDiffList.getSnapshotById(lastSnapshotId);
+      ssDeltaNoReplication = computeFileSize(sid);
+      replication = getFileReplication(sid);
+    }
+
+    return ssDeltaNoReplication * replication;
   }
 
   /** The same as computeFileSize(null). */
@@ -963,7 +1041,7 @@ public class INodeFile extends INodeWithAdditionalFields
     } else {
       // Collect all distinct blocks
       Set<BlockInfo> allBlocks = new HashSet<>(Arrays.asList(getBlocks()));
-      List<FileDiff> diffs = sf.getDiffs().asList();
+      DiffList<FileDiff> diffs = sf.getDiffs().asList();
       for(FileDiff diff : diffs) {
         BlockInfo[] diffBlocks = diff.getBlocks();
         if (diffBlocks != null) {
@@ -1020,6 +1098,23 @@ public class INodeFile extends INodeWithAdditionalFields
     out.print(", blocks=");
     out.print(blocks.length == 0 ? null: blocks[0]);
     out.println();
+
+    final FileWithSnapshotFeature snapshotFeature =
+        getFileWithSnapshotFeature();
+    if (snapshotFeature != null) {
+      if (prefix.length() >= 2) {
+        prefix.setLength(prefix.length() - 2);
+        prefix.append("  ");
+      }
+      out.print(prefix);
+      out.print(snapshotFeature);
+    }
+    out.println();
+  }
+
+  @Override
+  public void accept(NamespaceVisitor visitor, int snapshot) {
+    visitor.visitFile(this, snapshot);
   }
 
   /**

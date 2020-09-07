@@ -19,12 +19,16 @@ package org.apache.hadoop.hdfs.net;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.Node;
 import org.apache.hadoop.net.NodeBase;
+import org.apache.hadoop.util.ReflectionUtils;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -36,15 +40,18 @@ import java.util.Random;
  * remaining parts should be the same.
  *
  * Currently a placeholder to test storage type info.
- * TODO : add "chooseRandom with storageType info" function.
  */
 public class DFSNetworkTopology extends NetworkTopology {
 
   private static final Random RANDOM = new Random();
 
   public static DFSNetworkTopology getInstance(Configuration conf) {
-    DFSNetworkTopology nt = new DFSNetworkTopology();
-    return (DFSNetworkTopology)nt.init(DFSTopologyNodeImpl.FACTORY);
+
+    DFSNetworkTopology nt = ReflectionUtils.newInstance(conf.getClass(
+        DFSConfigKeys.DFS_NET_TOPOLOGY_IMPL_KEY,
+        DFSConfigKeys.DFS_NET_TOPOLOGY_IMPL_DEFAULT,
+        DFSNetworkTopology.class), conf);
+    return (DFSNetworkTopology) nt.init(DFSTopologyNodeImpl.FACTORY);
   }
 
   /**
@@ -56,6 +63,7 @@ public class DFSNetworkTopology extends NetworkTopology {
    *
    * @param scope range of nodes from which a node will be chosen
    * @param excludedNodes nodes to be excluded from
+   * @param type the storage type we search for
    * @return the chosen node
    */
   public Node chooseRandomWithStorageType(final String scope,
@@ -68,6 +76,69 @@ public class DFSNetworkTopology extends NetworkTopology {
       } else {
         return chooseRandomWithStorageType(
             scope, null, excludedNodes, type);
+      }
+    } finally {
+      netlock.readLock().unlock();
+    }
+  }
+
+  /**
+   * Randomly choose one node from <i>scope</i> with the given storage type.
+   *
+   * If scope starts with ~, choose one from the all nodes except for the
+   * ones in <i>scope</i>; otherwise, choose one from <i>scope</i>.
+   * If excludedNodes is given, choose a node that's not in excludedNodes.
+   *
+   * This call would make up to two calls. It first tries to get a random node
+   * (with old method) and check if it satisfies. If yes, simply return it.
+   * Otherwise, it make a second call (with the new method) by passing in a
+   * storage type.
+   *
+   * This is for better performance reason. Put in short, the key note is that
+   * the old method is faster but may take several runs, while the new method
+   * is somewhat slower, and always succeed in one trial.
+   * See HDFS-11535 for more detail.
+   *
+   * @param scope range of nodes from which a node will be chosen
+   * @param excludedNodes nodes to be excluded from
+   * @param type the storage type we search for
+   * @return the chosen node
+   */
+  public Node chooseRandomWithStorageTypeTwoTrial(final String scope,
+      final Collection<Node> excludedNodes, StorageType type) {
+    netlock.readLock().lock();
+    try {
+      String searchScope;
+      String excludedScope;
+      if (scope.startsWith("~")) {
+        searchScope = NodeBase.ROOT;
+        excludedScope = scope.substring(1);
+      } else {
+        searchScope = scope;
+        excludedScope = null;
+      }
+      // next do a two-trial search
+      // first trial, call the old method, inherited from NetworkTopology
+      Node n = chooseRandom(searchScope, excludedScope, excludedNodes);
+      if (n == null) {
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("No node to choose.");
+        }
+        // this means there is simply no node to choose from
+        return null;
+      }
+      Preconditions.checkArgument(n instanceof DatanodeDescriptor);
+      DatanodeDescriptor dnDescriptor = (DatanodeDescriptor)n;
+
+      if (dnDescriptor.hasStorageType(type)) {
+        // the first trial succeeded, just return
+        return dnDescriptor;
+      } else {
+        // otherwise, make the second trial by calling the new method
+        LOG.debug("First trial failed, node has no type {}, " +
+            "making second trial carrying this type", type);
+        return chooseRandomWithStorageType(searchScope, excludedScope,
+            excludedNodes, type);
       }
     } finally {
       netlock.readLock().unlock();
@@ -99,23 +170,20 @@ public class DFSNetworkTopology extends NetworkTopology {
    * all it's ancestors' storage counters accordingly, this way the excluded
    * root is out of the picture.
    *
-   * TODO : this function has duplicate code as NetworkTopology, need to
-   * refactor in the future.
-   *
-   * @param scope
-   * @param excludedScope
-   * @param excludedNodes
-   * @return
+   * @param scope the scope where we look for node.
+   * @param excludedScope the scope where the node must NOT be from.
+   * @param excludedNodes the returned node must not be in this set
+   * @return a node with required storage type
    */
   @VisibleForTesting
   Node chooseRandomWithStorageType(final String scope,
       String excludedScope, final Collection<Node> excludedNodes,
       StorageType type) {
     if (excludedScope != null) {
-      if (scope.startsWith(excludedScope)) {
+      if (isChildScope(scope, excludedScope)) {
         return null;
       }
-      if (!excludedScope.startsWith(scope)) {
+      if (!isChildScope(excludedScope, scope)) {
         excludedScope = null;
       }
     }
@@ -126,7 +194,13 @@ public class DFSNetworkTopology extends NetworkTopology {
     }
     if (!(node instanceof DFSTopologyNodeImpl)) {
       // a node is either DFSTopologyNodeImpl, or a DatanodeDescriptor
-      return ((DatanodeDescriptor)node).hasStorageType(type) ? node : null;
+      // if a node is DatanodeDescriptor and excludedNodes contains it,
+      // return null;
+      if (excludedNodes != null && excludedNodes.contains(node)) {
+        LOG.debug("{} in excludedNodes", node);
+        return null;
+      }
+      return ((DatanodeDescriptor) node).hasStorageType(type) ? node : null;
     }
     DFSTopologyNodeImpl root = (DFSTopologyNodeImpl)node;
     Node excludeRoot = excludedScope == null ? null : getNode(excludedScope);
@@ -144,10 +218,30 @@ public class DFSNetworkTopology extends NetworkTopology {
     }
     if (excludedNodes != null) {
       for (Node excludedNode : excludedNodes) {
-        // all excluded nodes should be DatanodeDescriptor
-        Preconditions.checkArgument(excludedNode instanceof DatanodeDescriptor);
-        availableCount -= ((DatanodeDescriptor) excludedNode)
-            .hasStorageType(type) ? 1 : 0;
+        if (excludeRoot != null && isNodeInScope(excludedNode, excludedScope)) {
+          continue;
+        }
+        if (excludedNode instanceof DatanodeDescriptor) {
+          availableCount -= ((DatanodeDescriptor) excludedNode)
+              .hasStorageType(type) ? 1 : 0;
+        } else if (excludedNode instanceof DFSTopologyNodeImpl) {
+          availableCount -= ((DFSTopologyNodeImpl) excludedNode)
+              .getSubtreeStorageCount(type);
+        } else if (excludedNode instanceof DatanodeInfo) {
+          // find out the corresponding DatanodeDescriptor object, beacuse
+          // we need to get its storage type info.
+          // could be expensive operation, fortunately the size of excluded
+          // nodes set is supposed to be very small.
+          String nodeLocation = excludedNode.getNetworkLocation()
+              + "/" + excludedNode.getName();
+          DatanodeDescriptor dn = (DatanodeDescriptor)getNode(nodeLocation);
+          if (dn == null) {
+            continue;
+          }
+          availableCount -= dn.hasStorageType(type)? 1 : 0;
+        } else {
+          LOG.error("Unexpected node type: {}.", excludedNode.getClass());
+        }
       }
     }
     if (availableCount <= 0) {
@@ -155,17 +249,10 @@ public class DFSNetworkTopology extends NetworkTopology {
       return null;
     }
     // to this point, it is guaranteed that there is at least one node
-    // that satisfies the requirement, keep trying until we found one.
-    Node chosen;
-    do {
-      chosen = chooseRandomWithStorageTypeAndExcludeRoot(root, excludeRoot,
-          type);
-      if (excludedNodes == null || !excludedNodes.contains(chosen)) {
-        break;
-      } else {
-        LOG.debug("Node {} is excluded, continuing.", chosen);
-      }
-    } while (true);
+    // that satisfies the requirement.
+    Node chosen =
+        chooseRandomWithStorageTypeAndExcludeRoot(root, excludeRoot, type,
+            excludedNodes);
     LOG.debug("chooseRandom returning {}", chosen);
     return chosen;
   }
@@ -174,23 +261,23 @@ public class DFSNetworkTopology extends NetworkTopology {
    * Choose a random node that has the required storage type, under the given
    * root, with an excluded subtree root (could also just be a leaf node).
    *
-   * Note that excludedNode is checked after a random node, so it is not being
-   * handled here.
-   *
    * @param root the root node where we start searching for a datanode
    * @param excludeRoot the root of the subtree what should be excluded
    * @param type the expected storage type
+   * @param excludedNodes the list of nodes to be excluded
    * @return a random datanode, with the storage type, and is not in excluded
    * scope
    */
   private Node chooseRandomWithStorageTypeAndExcludeRoot(
-      DFSTopologyNodeImpl root, Node excludeRoot, StorageType type) {
+      DFSTopologyNodeImpl root, Node excludeRoot, StorageType type,
+      Collection<Node> excludedNodes) {
     Node chosenNode;
     if (root.isRack()) {
       // children are datanode descriptor
       ArrayList<Node> candidates = new ArrayList<>();
       for (Node node : root.getChildren()) {
-        if (node.equals(excludeRoot)) {
+        if (node.equals(excludeRoot) || (excludedNodes != null && excludedNodes
+            .contains(node))) {
           continue;
         }
         DatanodeDescriptor dnDescriptor = (DatanodeDescriptor)node;
@@ -207,7 +294,7 @@ public class DFSNetworkTopology extends NetworkTopology {
     } else {
       // the children are inner nodes
       ArrayList<DFSTopologyNodeImpl> candidates =
-          getEligibleChildren(root, excludeRoot, type);
+          getEligibleChildren(root, excludeRoot, type, excludedNodes);
       if (candidates.size() == 0) {
         return null;
       }
@@ -236,7 +323,7 @@ public class DFSNetworkTopology extends NetworkTopology {
       }
       DFSTopologyNodeImpl nextRoot = candidates.get(idxChosen);
       chosenNode = chooseRandomWithStorageTypeAndExcludeRoot(
-          nextRoot, excludeRoot, type);
+          nextRoot, excludeRoot, type, excludedNodes);
     }
     return chosenNode;
   }
@@ -249,11 +336,13 @@ public class DFSNetworkTopology extends NetworkTopology {
    * @param root the subtree root we check.
    * @param excludeRoot the root of the subtree that should be excluded.
    * @param type the storage type we look for.
+   * @param excludedNodes the list of excluded nodes.
    * @return a list of possible nodes, each of them is eligible as the next
    * level root we search.
    */
   private ArrayList<DFSTopologyNodeImpl> getEligibleChildren(
-      DFSTopologyNodeImpl root, Node excludeRoot, StorageType type) {
+      DFSTopologyNodeImpl root, Node excludeRoot, StorageType type,
+      Collection<Node> excludedNodes) {
     ArrayList<DFSTopologyNodeImpl> candidates = new ArrayList<>();
     int excludeCount = 0;
     if (excludeRoot != null && root.isAncestor(excludeRoot)) {
@@ -279,6 +368,24 @@ public class DFSNetworkTopology extends NetworkTopology {
       if (excludeRoot != null && excludeCount != 0 &&
           (dfsNode.isAncestor(excludeRoot) || dfsNode.equals(excludeRoot))) {
         storageCount -= excludeCount;
+      }
+      if (excludedNodes != null) {
+        for (Node excludedNode : excludedNodes) {
+          if (excludeRoot != null && isNodeInScope(excludedNode,
+              NodeBase.getPath(excludeRoot))) {
+            continue;
+          }
+          if (isNodeInScope(excludedNode, NodeBase.getPath(node))) {
+            if (excludedNode instanceof DatanodeDescriptor) {
+              storageCount -=
+                  ((DatanodeDescriptor) excludedNode).hasStorageType(type) ?
+                      1 : 0;
+            } else if (excludedNode instanceof DFSTopologyNodeImpl) {
+              storageCount -= ((DFSTopologyNodeImpl) excludedNode)
+                  .getSubtreeStorageCount(type);
+            }
+          }
+        }
       }
       if (storageCount > 0) {
         candidates.add(dfsNode);

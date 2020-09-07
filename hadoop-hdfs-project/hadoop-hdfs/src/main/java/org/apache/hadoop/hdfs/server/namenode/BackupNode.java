@@ -52,7 +52,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.protobuf.BlockingService;
+import org.apache.hadoop.thirdparty.protobuf.BlockingService;
 
 /**
  * BackupNode.
@@ -471,7 +471,7 @@ public class BackupNode extends NameNode {
      * {@link LeaseManager.Monitor} protected by SafeMode.
      * {@link BlockManager.RedundancyMonitor} protected by SafeMode.
      * {@link HeartbeatManager.Monitor} protected by SafeMode.
-     * {@link DecommissionManager.Monitor} need to prohibit refreshNodes().
+     * {@link DatanodeAdminManager.Monitor} need to prohibit refreshNodes().
      * {@link PendingReconstructionBlocks.PendingReconstructionMonitor}
      * harmless, because RedundancyMonitor is muted.
      */

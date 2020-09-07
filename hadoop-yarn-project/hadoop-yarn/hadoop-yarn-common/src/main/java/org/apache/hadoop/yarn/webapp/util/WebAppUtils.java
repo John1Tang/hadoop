@@ -90,8 +90,41 @@ public class WebAppUtils {
     }
   }
 
+  /**
+   * Runs a certain function against the active RM. The function's first
+   * argument is expected to be a string which contains the address of
+   * the RM being tried.
+   */
+  public static <T, R> R execOnActiveRM(Configuration conf,
+      ThrowingBiFunction<String, T, R> func, T arg) throws Exception {
+    String rm1Address = getRMWebAppURLWithScheme(conf, 0);
+    try {
+      return func.apply(rm1Address, arg);
+    } catch (Exception e) {
+      if (HAUtil.isHAEnabled(conf)) {
+        int rms = HAUtil.getRMHAIds(conf).size();
+        for (int i=1; i<rms; i++) {
+          try {
+            rm1Address = getRMWebAppURLWithScheme(conf, i);
+            return func.apply(rm1Address, arg);
+          } catch (Exception e1) {
+            // ignore and try next one when RM is down
+            e = e1;
+          }
+        }
+      }
+      throw e;
+    }
+  }
+
+  /** A BiFunction which throws on Exception. */
+  @FunctionalInterface
+  public interface ThrowingBiFunction<T, U, R> {
+    R apply(T t, U u) throws Exception;
+  }
+
   public static String getRMWebAppURLWithoutScheme(Configuration conf,
-      boolean isHAEnabled)  {
+      boolean isHAEnabled, int haIdIndex)  {
     YarnConfiguration yarnConfig = new YarnConfiguration(conf);
     // set RM_ID if we have not configure it.
     if (isHAEnabled) {
@@ -99,7 +132,7 @@ public class WebAppUtils {
       if (rmId == null || rmId.isEmpty()) {
         List<String> rmIds = new ArrayList<>(HAUtil.getRMHAIds(conf));
         if (rmIds != null && !rmIds.isEmpty()) {
-          yarnConfig.set(YarnConfiguration.RM_HA_ID, rmIds.get(0));
+          yarnConfig.set(YarnConfiguration.RM_HA_ID, rmIds.get(haIdIndex));
         }
       }
     }
@@ -120,13 +153,33 @@ public class WebAppUtils {
     }
   }
 
+  public static String getRMWebAppURLWithScheme(Configuration conf,
+      int haIdIndex) {
+    return getHttpSchemePrefix(conf) + getRMWebAppURLWithoutScheme(
+        conf, HAUtil.isHAEnabled(conf), haIdIndex);
+  }
+
   public static String getRMWebAppURLWithScheme(Configuration conf) {
     return getHttpSchemePrefix(conf) + getRMWebAppURLWithoutScheme(
-        conf, HAUtil.isHAEnabled(conf));
+        conf, HAUtil.isHAEnabled(conf), 0);
   }
 
   public static String getRMWebAppURLWithoutScheme(Configuration conf) {
-    return getRMWebAppURLWithoutScheme(conf, false);
+    return getRMWebAppURLWithoutScheme(conf, false, 0);
+  }
+
+  public static String getRouterWebAppURLWithScheme(Configuration conf) {
+    return getHttpSchemePrefix(conf) + getRouterWebAppURLWithoutScheme(conf);
+  }
+
+  public static String getRouterWebAppURLWithoutScheme(Configuration conf) {
+    if (YarnConfiguration.useHttps(conf)) {
+      return conf.get(YarnConfiguration.ROUTER_WEBAPP_HTTPS_ADDRESS,
+          YarnConfiguration.DEFAULT_ROUTER_WEBAPP_HTTPS_ADDRESS);
+    } else {
+      return conf.get(YarnConfiguration.ROUTER_WEBAPP_ADDRESS,
+          YarnConfiguration.DEFAULT_ROUTER_WEBAPP_ADDRESS);
+    }
   }
 
   public static List<String> getProxyHostsAndPortsForAmFilter(
@@ -300,16 +353,41 @@ public class WebAppUtils {
   }
 
   public static String getAHSWebAppURLWithoutScheme(Configuration conf) {
-    return getTimelineReaderWebAppURL(conf);
-  }
-
-  public static String getTimelineReaderWebAppURL(Configuration conf) {
     if (YarnConfiguration.useHttps(conf)) {
       return conf.get(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_HTTPS_ADDRESS,
-        YarnConfiguration.DEFAULT_TIMELINE_SERVICE_WEBAPP_HTTPS_ADDRESS);
+          YarnConfiguration.DEFAULT_TIMELINE_SERVICE_WEBAPP_HTTPS_ADDRESS);
     } else {
       return conf.get(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
-        YarnConfiguration.DEFAULT_TIMELINE_SERVICE_WEBAPP_ADDRESS);
+          YarnConfiguration.DEFAULT_TIMELINE_SERVICE_WEBAPP_ADDRESS);
+    }
+  }
+
+  public static String getTimelineReaderWebAppURLWithoutScheme(
+      Configuration conf) {
+    if (YarnConfiguration.useHttps(conf)) {
+      return conf
+          .get(YarnConfiguration.TIMELINE_SERVICE_READER_WEBAPP_HTTPS_ADDRESS,
+              YarnConfiguration.
+                  DEFAULT_TIMELINE_SERVICE_READER_WEBAPP_HTTPS_ADDRESS);
+    } else {
+      return conf.get(YarnConfiguration.TIMELINE_SERVICE_READER_WEBAPP_ADDRESS,
+          YarnConfiguration.
+              DEFAULT_TIMELINE_SERVICE_READER_WEBAPP_ADDRESS);
+    }
+  }
+
+  public static String getTimelineCollectorWebAppURLWithoutScheme(
+      Configuration conf) {
+    if (YarnConfiguration.useHttps(conf)) {
+      return conf.get(
+          YarnConfiguration.TIMELINE_SERVICE_COLLECTOR_WEBAPP_HTTPS_ADDRESS,
+          YarnConfiguration.
+              DEFAULT_TIMELINE_SERVICE_COLLECTOR_WEBAPP_HTTPS_ADDRESS);
+    } else {
+      return conf
+          .get(YarnConfiguration.TIMELINE_SERVICE_COLLECTOR_WEBAPP_ADDRESS,
+              YarnConfiguration.
+                  DEFAULT_TIMELINE_SERVICE_COLLECTOR_WEBAPP_ADDRESS);
     }
   }
 
@@ -328,7 +406,7 @@ public class WebAppUtils {
       return schemePrefix + url;
     }
   }
-  
+
   public static String getRunningLogURL(
       String nodeHttpAddress, String containerId, String user) {
     if (nodeHttpAddress == null || nodeHttpAddress.isEmpty() ||
@@ -375,16 +453,21 @@ public class WebAppUtils {
   /**
    * Load the SSL keystore / truststore into the HttpServer builder.
    * @param builder the HttpServer2.Builder to populate with ssl config
-   * @param sslConf the Configuration instance to use during loading of SSL conf
+   * @param conf the Configuration instance to load custom SSL config from
+   *
+   * @return HttpServer2.Builder instance (passed in as the first parameter)
+   *         after loading SSL stores
    */
   public static HttpServer2.Builder loadSslConfiguration(
-      HttpServer2.Builder builder, Configuration sslConf) {
-    if (sslConf == null) {
-      sslConf = new Configuration(false);
+      HttpServer2.Builder builder, Configuration conf) {
+
+    Configuration sslConf = new Configuration(false);
+
+    sslConf.addResource(YarnConfiguration.YARN_SSL_SERVER_RESOURCE_DEFAULT);
+    if (conf != null) {
+      sslConf.addResource(conf);
     }
     boolean needsClientAuth = YarnConfiguration.YARN_SSL_CLIENT_HTTPS_NEED_AUTH_DEFAULT;
-    sslConf.addResource(YarnConfiguration.YARN_SSL_SERVER_RESOURCE_DEFAULT);
-
     return builder
         .needsClientAuth(needsClientAuth)
         .keyPassword(getPassword(sslConf, WEB_APP_KEY_PASSWORD_KEY))
@@ -475,6 +558,27 @@ public class WebAppUtils {
         }
       }
       return URLEncodedUtils.format(params, encoding);
+    }
+    return null;
+  }
+
+  /**
+   * Get a query string.
+   * @param request HttpServletRequest with the request details
+   * @return the query parameter string
+  */
+  public static List<NameValuePair> getURLEncodedQueryParam(
+      HttpServletRequest request) {
+    String queryString = request.getQueryString();
+    if (queryString != null && !queryString.isEmpty()) {
+      String reqEncoding = request.getCharacterEncoding();
+      if (reqEncoding == null || reqEncoding.isEmpty()) {
+        reqEncoding = "ISO-8859-1";
+      }
+      Charset encoding = Charset.forName(reqEncoding);
+      List<NameValuePair> params = URLEncodedUtils.parse(queryString,
+          encoding);
+      return params;
     }
     return null;
   }

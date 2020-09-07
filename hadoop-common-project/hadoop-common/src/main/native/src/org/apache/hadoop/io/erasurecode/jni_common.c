@@ -63,8 +63,9 @@ IsalCoder* getCoder(JNIEnv* env, jobject thiz) {
                                     "Field nativeCoder not found");
   }
   pCoder = (IsalCoder*)(*env)->GetLongField(env, thiz, fid);
-  pCoder->verbose = (verbose == JNI_TRUE) ? 1 : 0;
-
+  if (pCoder != NULL) {
+    pCoder->verbose = (verbose == JNI_TRUE) ? 1 : 0;
+  }
   return pCoder;
 }
 
@@ -91,6 +92,7 @@ void getInputs(JNIEnv *env, jobjectArray inputs, jintArray inputOffsets,
       destInputs[i] = NULL;
     }
   }
+  (*env)->ReleaseIntArrayElements(env, inputOffsets, tmpInputOffsets, 0);
 }
 
 void getOutputs(JNIEnv *env, jobjectArray outputs, jintArray outputOffsets,
@@ -111,4 +113,5 @@ void getOutputs(JNIEnv *env, jobjectArray outputs, jintArray outputOffsets,
                                                                   byteBuffer));
     destOutputs[i] += tmpOutputOffsets[i];
   }
+  (*env)->ReleaseIntArrayElements(env, outputOffsets, tmpOutputOffsets, 0);
 }

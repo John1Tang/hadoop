@@ -50,6 +50,34 @@ export default Ember.Controller.extend({
     html = html + '><a href="yarn-nodes">Nodes<span class="sr-only">' +
         '(current)</span></a></li>';
     return Ember.String.htmlSafe(html);
-  }.property('currentPath')
-});
+  }.property('currentPath'),
 
+  isQueuesTabActive: function() {
+    var path = this.get('currentPath');
+    if (path === 'yarn-queues') {
+      return true;
+    }
+    return false;
+  }.property('currentPath'),
+
+  clusterInfo: function() {
+    if (this.model && this.model.clusterInfo) {
+      return this.model.clusterInfo.get('firstObject');
+    }
+    return null;
+  }.property('model.clusterInfo'),
+
+  userInfo: function() {
+    if (this.model && this.model.userInfo) {
+      return this.model.userInfo.get('firstObject');
+    }
+    return null;
+  }.property('model.userInfo'),
+
+  isTimelineUnHealthy: function() {
+    if (this.model && this.model.timelineHealth) {
+      return this.model.timelineHealth.get('isTimelineUnHealthy');
+    }
+    return true;
+  }.property('model.timelineHealth')
+});

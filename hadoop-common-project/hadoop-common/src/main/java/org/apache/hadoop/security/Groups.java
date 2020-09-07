@@ -26,7 +26,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
@@ -59,9 +58,8 @@ import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Timer;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A user-to-groups mapping service.
@@ -74,12 +72,13 @@ import org.apache.commons.logging.LogFactory;
 @InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
 @InterfaceStability.Evolving
 public class Groups {
-  private static final Log LOG = LogFactory.getLog(Groups.class);
+  @VisibleForTesting
+  static final Logger LOG = LoggerFactory.getLogger(Groups.class);
   
   private final GroupMappingServiceProvider impl;
 
-  private final LoadingCache<String, List<String>> cache;
-  private final AtomicReference<Map<String, List<String>>> staticMapRef =
+  private final LoadingCache<String, Set<String>> cache;
+  private final AtomicReference<Map<String, Set<String>>> staticMapRef =
       new AtomicReference<>();
   private final long cacheTimeout;
   private final long negativeCacheTimeout;
@@ -168,8 +167,7 @@ public class Groups {
         CommonConfigurationKeys.HADOOP_USER_GROUP_STATIC_OVERRIDES_DEFAULT);
     Collection<String> mappings = StringUtils.getStringCollection(
         staticMapping, ";");
-    Map<String, List<String>> staticUserToGroupsMap =
-        new HashMap<String, List<String>>();
+    Map<String, Set<String>> staticUserToGroupsMap = new HashMap<>();
     for (String users : mappings) {
       Collection<String> userToGroups = StringUtils.getStringCollection(users,
           "=");
@@ -181,10 +179,10 @@ public class Groups {
       String[] userToGroupsArray = userToGroups.toArray(new String[userToGroups
           .size()]);
       String user = userToGroupsArray[0];
-      List<String> groups = Collections.emptyList();
+      Set<String> groups = Collections.emptySet();
       if (userToGroupsArray.length == 2) {
-        groups = (List<String>) StringUtils
-            .getStringCollection(userToGroupsArray[1]);
+        groups = new LinkedHashSet(StringUtils
+            .getStringCollection(userToGroupsArray[1]));
       }
       staticUserToGroupsMap.put(user, groups);
     }
@@ -203,15 +201,47 @@ public class Groups {
   /**
    * Get the group memberships of a given user.
    * If the user's group is not cached, this method may block.
+   * Note this method can be expensive as it involves Set->List conversion.
+   * For user with large group membership (i.e., > 1000 groups), we recommend
+   * using getGroupSet to avoid the conversion and fast membership look up via
+   * contains().
    * @param user User's name
-   * @return the group memberships of the user
+   * @return the group memberships of the user as list
+   * @throws IOException if user does not exist
+   * @deprecated Use {@link #getGroupsSet(String user)} instead.
+   */
+  @Deprecated
+  public List<String> getGroups(final String user) throws IOException {
+    return Collections.unmodifiableList(new ArrayList<>(
+        getGroupInternal(user)));
+  }
+
+  /**
+   * Get the group memberships of a given user.
+   * If the user's group is not cached, this method may block.
+   * This provide better performance when user has large group membership via
+   * 1) avoid set->list->set conversion for the caller UGI/PermissionCheck
+   * 2) fast lookup using contains() via Set instead of List
+   * @param user User's name
+   * @return the group memberships of the user as set
    * @throws IOException if user does not exist
    */
-  public List<String> getGroups(final String user) throws IOException {
+  public Set<String> getGroupsSet(final String user) throws IOException {
+    return Collections.unmodifiableSet(getGroupInternal(user));
+  }
+
+  /**
+   * Get the group memberships of a given user.
+   * If the user's group is not cached, this method may block.
+   * @param user User's name
+   * @return the group memberships of the user as Set
+   * @throws IOException if user does not exist
+   */
+  private Set<String> getGroupInternal(final String user) throws IOException {
     // No need to lookup for groups of static users
-    Map<String, List<String>> staticUserToGroupsMap = staticMapRef.get();
+    Map<String, Set<String>> staticUserToGroupsMap = staticMapRef.get();
     if (staticUserToGroupsMap != null) {
-      List<String> staticMapping = staticUserToGroupsMap.get(user);
+      Set<String> staticMapping = staticUserToGroupsMap.get(user);
       if (staticMapping != null) {
         return staticMapping;
       }
@@ -267,7 +297,7 @@ public class Groups {
   /**
    * Deals with loading data into the cache.
    */
-  private class GroupCacheLoader extends CacheLoader<String, List<String>> {
+  private class GroupCacheLoader extends CacheLoader<String, Set<String>> {
 
     private ListeningExecutorService executorService;
 
@@ -308,16 +338,17 @@ public class Groups {
      * @throws IOException to prevent caching negative entries
      */
     @Override
-    public List<String> load(String user) throws Exception {
+    public Set<String> load(String user) throws Exception {
+      LOG.debug("GroupCacheLoader - load.");
       TraceScope scope = null;
       Tracer tracer = Tracer.curThreadTracer();
       if (tracer != null) {
         scope = tracer.newScope("Groups#fetchGroupList");
         scope.addKVAnnotation("user", user);
       }
-      List<String> groups = null;
+      Set<String> groups = null;
       try {
-        groups = fetchGroupList(user);
+        groups = fetchGroupSet(user);
       } finally {
         if (scope != null) {
           scope.close();
@@ -333,9 +364,7 @@ public class Groups {
         throw noGroupsForUser(user);
       }
 
-      // return immutable de-duped list
-      return Collections.unmodifiableList(
-          new ArrayList<>(new LinkedHashSet<>(groups)));
+      return groups;
     }
 
     /**
@@ -344,27 +373,25 @@ public class Groups {
      * implementation, otherwise is arranges for the cache to be updated later
      */
     @Override
-    public ListenableFuture<List<String>> reload(final String key,
-                                                 List<String> oldValue)
+    public ListenableFuture<Set<String>> reload(final String key,
+                                                 Set<String> oldValue)
         throws Exception {
+      LOG.debug("GroupCacheLoader - reload (async).");
       if (!reloadGroupsInBackground) {
         return super.reload(key, oldValue);
       }
 
       backgroundRefreshQueued.incrementAndGet();
-      ListenableFuture<List<String>> listenableFuture =
-          executorService.submit(new Callable<List<String>>() {
-            @Override
-            public List<String> call() throws Exception {
-              backgroundRefreshQueued.decrementAndGet();
-              backgroundRefreshRunning.incrementAndGet();
-              List<String> results = load(key);
-              return results;
-            }
+      ListenableFuture<Set<String>> listenableFuture =
+          executorService.submit(() -> {
+            backgroundRefreshQueued.decrementAndGet();
+            backgroundRefreshRunning.incrementAndGet();
+            Set<String> results = load(key);
+            return results;
           });
-      Futures.addCallback(listenableFuture, new FutureCallback<List<String>>() {
+      Futures.addCallback(listenableFuture, new FutureCallback<Set<String>>() {
         @Override
-        public void onSuccess(List<String> result) {
+        public void onSuccess(Set<String> result) {
           backgroundRefreshSuccess.incrementAndGet();
           backgroundRefreshRunning.decrementAndGet();
         }
@@ -373,16 +400,17 @@ public class Groups {
           backgroundRefreshException.incrementAndGet();
           backgroundRefreshRunning.decrementAndGet();
         }
-      });
+      }, MoreExecutors.directExecutor());
       return listenableFuture;
     }
 
     /**
-     * Queries impl for groups belonging to the user. This could involve I/O and take awhile.
+     * Queries impl for groups belonging to the user.
+     * This could involve I/O and take awhile.
      */
-    private List<String> fetchGroupList(String user) throws IOException {
+    private Set<String> fetchGroupSet(String user) throws IOException {
       long startMs = timer.monotonicNow();
-      List<String> groupList = impl.getGroups(user);
+      Set<String> groups = impl.getGroupsSet(user);
       long endMs = timer.monotonicNow();
       long deltaMs = endMs - startMs ;
       UserGroupInformation.metrics.addGetGroups(deltaMs);
@@ -390,8 +418,7 @@ public class Groups {
         LOG.warn("Potential performance problem: getGroups(user=" + user +") " +
           "took " + deltaMs + " milliseconds.");
       }
-
-      return groupList;
+      return groups;
     }
   }
 

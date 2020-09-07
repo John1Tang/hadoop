@@ -24,8 +24,6 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -33,13 +31,15 @@ import org.apache.hadoop.io.WritableComparable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Runs a job multiple times and takes average of all runs.
  */
 public class MRBench extends Configured implements Tool{
   
-  private static final Log LOG = LogFactory.getLog(MRBench.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MRBench.class);
   private static final String DEFAULT_INPUT_SUB = "mr_input";
   private static final String DEFAULT_OUTPUT_SUB = "mr_output";
 
@@ -48,7 +48,7 @@ public class MRBench extends Configured implements Tool{
   private static Path INPUT_DIR = new Path(BASE_DIR, DEFAULT_INPUT_SUB);
   private static Path OUTPUT_DIR = new Path(BASE_DIR, DEFAULT_OUTPUT_SUB);
   
-  public static enum Order {RANDOM, ASCENDING, DESCENDING}; 
+  public enum Order {RANDOM, ASCENDING, DESCENDING};
   
   /**
    * Takes input format as text lines, runs some processing on it and 
@@ -284,7 +284,7 @@ public class MRBench extends Configured implements Tool{
       }
 
     JobConf jobConf = setupJob(numMaps, numReduces, jarFile);
-    FileSystem fs = FileSystem.get(jobConf);
+    FileSystem fs = BASE_DIR.getFileSystem(jobConf);
     Path inputFile = new Path(INPUT_DIR, "input_" + (new Random()).nextInt() + ".txt");
     generateTextFile(fs, inputFile, inputLines, inputSortOrder);
 

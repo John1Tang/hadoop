@@ -13,16 +13,16 @@
  limitations under the License. See accompanying LICENSE file.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 <parent>
    <groupId>org.apache.hadoop</groupId>
    <artifactId>hadoop-project</artifactId>
-   <version>3.0.0-alpha3-SNAPSHOT</version>
+   <version>3.4.0-SNAPSHOT</version>
    <relativePath>../../hadoop-project</relativePath>
 </parent>
   <artifactId>hadoop-client-runtime</artifactId>
-  <version>3.0.0-alpha3-SNAPSHOT</version>
+  <version>3.4.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
   <description>Apache Hadoop Client</description>
@@ -94,9 +94,13 @@
       <artifactId>commons-logging</artifactId>
       <scope>runtime</scope>
     </dependency>
+    <dependency>
+      <groupId>com.google.code.findbugs</groupId>
+      <artifactId>jsr305</artifactId>
+      <scope>runtime</scope>
+    </dependency>
     <!-- Move log4j to optional, since it is needed for some pieces folks might not use:
          * one of the three custom log4j appenders we have
-         * JobConf (?!) (so essentially any user of MapReduce)
       -->
     <dependency>
       <groupId>log4j</groupId>
@@ -150,6 +154,15 @@
                       <exclude>commons-logging:commons-logging</exclude>
                       <!-- Leave log4j unshaded so downstream users can configure logging. -->
                       <exclude>log4j:log4j</exclude>
+                      <!-- Leave javax APIs that are stable -->
+                      <!-- the jdk ships part of the javax.annotation namespace, so if we want to relocate this we'll have to care it out by class :( -->
+                      <exclude>com.google.code.findbugs:jsr305</exclude>
+                      <exclude>io.dropwizard.metrics:metrics-core</exclude>
+                      <exclude>org.eclipse.jetty:jetty-servlet</exclude>
+                      <exclude>org.eclipse.jetty:jetty-security</exclude>
+                      <exclude>org.ow2.asm:*</exclude>
+                      <!-- Leave bouncycastle unshaded because it's signed with a special Oracle certificate so it can be a custom JCE security provider -->
+                      <exclude>org.bouncycastle:*</exclude>
                     </excludes>
                   </artifactSet>
                   <filters>
@@ -175,18 +188,58 @@
                         <exclude>org/apache/jasper/compiler/Localizer.class</exclude>
                       </excludes>
                     </filter>
-                    <!-- We only have xerces as a dependency for XML output for the fsimage edits, we don't need anything specific to it for javax xml support -->
-                    <filter>
-                      <artifact>xerces:xercesImpl</artifact>
-                      <excludes>
-                        <exclude>META-INF/services/*</exclude>
-                      </excludes>
-                    </filter>
                     <!-- We rely on jersey for our web interfaces. We want to use its java services stuff only internal to jersey -->
                     <filter>
                       <artifact>com.sun.jersey:*</artifact>
                       <excludes>
                         <exclude>META-INF/services/javax.*</exclude>
+                      </excludes>
+                    </filter>
+                    <filter>
+                      <!-- skip french localization -->
+                      <artifact>org.apache.commons:commons-math3</artifact>
+                      <excludes>
+                        <exclude>assets/org/apache/commons/math3/**/*</exclude>
+                      </excludes>
+                    </filter>
+                    <filter>
+                      <!-- skip jetty license info already incorporated into LICENSE/NOTICE -->
+                      <artifact>org.eclipse.jetty:*</artifact>
+                      <excludes>
+                        <exclude>about.html</exclude>
+                      </excludes>
+                    </filter>
+                    <filter>
+                      <!-- skip jetty license info already incorporated into LICENSE/NOTICE -->
+                      <artifact>org.eclipse.jetty.websocket:*</artifact>
+                      <excludes>
+                        <exclude>about.html</exclude>
+                      </excludes>
+                    </filter>
+                    <filter>
+                      <!-- skip docs on formats used in kerby -->
+                      <artifact>org.apache.kerby:kerb-util</artifact>
+                      <excludes>
+                        <exclude>keytab.txt</exclude>
+                        <exclude>ccache.txt</exclude>
+                      </excludes>
+                    </filter>
+                    <!-- remove utility classes which are not required from
+                         dnsjava -->
+                    <filter>
+                      <artifact>dnsjava:dnsjava</artifact>
+                      <excludes>
+                        <exclude>dig*</exclude>
+                        <exclude>jnamed*</exclude>
+                        <exclude>lookup*</exclude>
+                        <exclude>update*</exclude>
+                      </excludes>
+                    </filter>
+                    <filter>
+                      <artifact>com.google.protobuf:protobuf-java</artifact>
+                      <excludes>
+                        <exclude>google/protobuf/*.proto</exclude>
+                        <exclude>google/protobuf/**/*.proto</exclude>
                       </excludes>
                     </filter>
                   </filters>
@@ -253,6 +306,7 @@
                         <exclude>io/serializations</exclude>
                       </excludes>
                     </relocation>
+                    <!-- JSRs that haven't made it to inclusion in J2SE -->
                     <relocation>
                       <pattern>javax/el/</pattern>
                       <shadedPattern>${shaded.dependency.prefix}.javax.el.</shadedPattern>
@@ -261,8 +315,36 @@
                       </excludes>
                     </relocation>
                     <relocation>
+                      <pattern>javax/cache/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.javax.cache.</shadedPattern>
+                      <excludes>
+                        <exclude>**/pom.xml</exclude>
+                      </excludes>
+                    </relocation>
+                    <relocation>
                       <pattern>javax/servlet/</pattern>
                       <shadedPattern>${shaded.dependency.prefix}.javax.servlet.</shadedPattern>
+                      <excludes>
+                        <exclude>**/pom.xml</exclude>
+                      </excludes>
+                    </relocation>
+                    <relocation>
+                      <pattern>javax/activation/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.javax.activation.</shadedPattern>
+                      <excludes>
+                        <exclude>**/pom.xml</exclude>
+                      </excludes>
+                    </relocation>
+                    <relocation>
+                      <pattern>javax/ws/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.javax.ws.</shadedPattern>
+                      <excludes>
+                        <exclude>**/pom.xml</exclude>
+                      </excludes>
+                    </relocation>
+                    <relocation>
+                      <pattern>javax/xml/bind/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.javax.xml.bind.</shadedPattern>
                       <excludes>
                         <exclude>**/pom.xml</exclude>
                       </excludes>
@@ -276,6 +358,11 @@
                         <exclude>net/topology/*</exclude>
                         <exclude>net/topology/**/*</exclude>
                       </excludes>
+                    </relocation>
+                    <!-- okio declares a top level package instead of nested -->
+                    <relocation>
+                      <pattern>okio/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.okio.</shadedPattern>
                     </relocation>
                     <!-- probably not. -->
     <!--

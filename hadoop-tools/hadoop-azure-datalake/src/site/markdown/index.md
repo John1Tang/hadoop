@@ -22,6 +22,10 @@ The `hadoop-azure-datalake` module provides support for integration with the
 [Azure Data Lake Store](https://azure.microsoft.com/en-in/documentation/services/data-lake-store/).
 This support comes via the JAR file `azure-datalake-store.jar`.
 
+### Related Documents
+
+* [Troubleshooting](troubleshooting_adl.html).
+
 ## Features
 
 * Read and write data stored in an Azure Data Lake Storage account.
@@ -32,6 +36,7 @@ This support comes via the JAR file `azure-datalake-store.jar`.
 * Tested for scale.
 * API `setOwner()`, `setAcl`, `removeAclEntries()`, `modifyAclEntries()` accepts UPN or OID
   (Object ID) as user and group names.
+* Supports per-account configuration.
 
 ## Limitations
 
@@ -83,7 +88,7 @@ Add the following properties to the cluster's `core-site.xml`
 
 ```xml
 <property>
-  <name>dfs.adls.oauth2.access.token.provider.type</name>
+  <name>fs.adl.oauth2.access.token.provider.type</name>
   <value>RefreshToken</value>
 </property>
 ```
@@ -95,12 +100,12 @@ service associated with the client id. See [*Active Directory Library For Java*]
 
 ```xml
 <property>
-  <name>dfs.adls.oauth2.client.id</name>
+  <name>fs.adl.oauth2.client.id</name>
   <value></value>
 </property>
 
 <property>
-  <name>dfs.adls.oauth2.refresh.token</name>
+  <name>fs.adl.oauth2.refresh.token</name>
   <value></value>
 </property>
 ```
@@ -111,20 +116,24 @@ service associated with the client id. See [*Active Directory Library For Java*]
 ##### Generating the Service Principal
 
 1.  Go to [the portal](https://portal.azure.com)
-2.  Under "Browse", look for Active Directory and click on it.
-3.  Create "Web Application". Remember the name you create here - that is what you will add to your ADL account as authorized user.
+2.  Under services in left nav, look for Azure Active Directory and click it.
+3.  Using "App Registrations" in the menu, create "Web Application". Remember
+    the name you create here - that is what you will add to your ADL account
+    as authorized user.
 4.  Go through the wizard
-5.  Once app is created, Go to app configuration, and find the section on "keys"
+5.  Once app is created, go to "keys" under "settings" for the app
 6.  Select a key duration and hit save. Save the generated keys.
-7. Note down the properties you will need to auth:
-    -  The client ID
+7.  Go back to the App Registrations page, and click on the "Endpoints" button
+    at the top
+    a. Note down the  "Token Endpoint" URL
+8. Note down the properties you will need to auth:
+    -  The "Application ID" of the Web App you created above
     -  The key you just generated above
-    -  The token endpoint (select "View endpoints" at the bottom of the page and copy/paste the OAuth2 .0 Token Endpoint value)
-    -  Resource: Always https://management.core.windows.net/ , for all customers
+    -  The token endpoint
 
 ##### Adding the service principal to your ADL Account
 1.  Go to the portal again, and open your ADL account
-2.  Select Users under Settings
+2.  Select `Access control (IAM)`
 3.  Add your user name you created in Step 6 above (note that it does not show up in the list, but will be found if you searched for the name)
 4.  Add "Owner" role
 
@@ -133,20 +142,94 @@ Add the following properties to your `core-site.xml`
 
 ```xml
 <property>
-  <name>dfs.adls.oauth2.refresh.url</name>
+  <name>fs.adl.oauth2.access.token.provider.type</name>
+  <value>ClientCredential</value>
+</property>
+
+<property>
+  <name>fs.adl.oauth2.refresh.url</name>
   <value>TOKEN ENDPOINT FROM STEP 7 ABOVE</value>
 </property>
 
 <property>
-  <name>dfs.adls.oauth2.client.id</name>
+  <name>fs.adl.oauth2.client.id</name>
   <value>CLIENT ID FROM STEP 7 ABOVE</value>
 </property>
 
 <property>
-  <name>dfs.adls.oauth2.credential</name>
+  <name>fs.adl.oauth2.credential</name>
   <value>PASSWORD FROM STEP 7 ABOVE</value>
 </property>
 ```
+
+#### Using MSI (Managed Service Identity)
+
+Azure VMs can be provisioned with "service identities" that are managed by the
+Identity extension within the VM. The advantage of doing this is that the
+credentials are managed by the extension, and do not have to be put into
+core-site.xml.
+
+To use MSI, modify the VM deployment template to use the identity extension. Note the
+port number you specified in the template: this is the port number for the REST endpoint
+of the token service exposed to localhost by the identity extension in the VM. The default
+recommended port number is 50342 - if the recommended port number is used, then the msi.port
+setting below can be omitted in the configuration.
+
+##### Configure core-site.xml
+Add the following properties to your `core-site.xml`
+
+```xml
+<property>
+  <name>fs.adl.oauth2.access.token.provider.type</name>
+  <value>Msi</value>
+</property>
+
+<property>
+  <name>fs.adl.oauth2.msi.port</name>
+  <value>PORT NUMBER FROM ABOVE (if different from the default of 50342)</value>
+</property>
+```
+
+### Using Device Code Auth for interactive login
+
+**Note:** This auth method is suitable for running interactive tools, but will
+not work for jobs submitted to a cluster.
+
+To use user-based login, Azure ActiveDirectory provides login flow using
+device code.
+
+To use device code flow, user must first create a **Native** app registration
+in the Azure portal, and provide the client ID for the app as a config. Here
+are the steps:
+
+1.  Go to [the portal](https://portal.azure.com)
+2.  Under services in left nav, look for Azure Active Directory and click on it.
+3.  Using "App Registrations" in the menu, create "Native Application".
+4.  Go through the wizard
+5.  Once app is created, note down the "Appplication ID" of the app
+6. Grant permissions to the app:
+    1. Click on "Permissions" for the app, and then add "Azure Data Lake" and
+       "Windows Azure Service Management API" permissions
+    2. Click on "Grant Permissions" to add the permissions to the app
+
+Add the following properties to your `core-site.xml`
+
+```xml
+<property>
+  <name>fs.adl.oauth2.devicecode.clientappid</name>
+  <value>APP ID FROM STEP 5 ABOVE</value>
+</property>
+```
+
+It is usually not desirable to add DeviceCode as the default token provider
+type. But it can be used when using a local command:
+```
+ hadoop fs -Dfs.adl.oauth2.access.token.provider.type=DeviceCode -ls ...
+```
+Running this will print a URL and device code that can be used to login from
+any browser (even on a different machine, outside of the ssh session). Once
+the login is done, the command continues.
+
 
 #### Protecting the Credentials with Credential Providers
 
@@ -161,15 +244,19 @@ For additional reading on the credential provider API, see
 ##### Provisioning
 
 ```bash
-hadoop credential create dfs.adls.oauth2.refresh.token -value 123
+hadoop credential create fs.adl.oauth2.client.id -value 123
     -provider localjceks://file/home/foo/adls.jceks
-hadoop credential create dfs.adls.oauth2.credential -value 123
+hadoop credential create fs.adl.oauth2.refresh.token -value 123
     -provider localjceks://file/home/foo/adls.jceks
 ```
 
 ##### Configuring core-site.xml or command line property
 
 ```xml
+<property>
+  <name>fs.adl.oauth2.access.token.provider.type</name>
+  <value>RefreshToken</value>
+</property>
 <property>
   <name>hadoop.security.credential.provider.path</name>
   <value>localjceks://file/home/foo/adls.jceks</value>
@@ -181,9 +268,10 @@ hadoop credential create dfs.adls.oauth2.credential -value 123
 
 ```bash
 hadoop distcp
-    [-D hadoop.security.credential.provider.path=localjceks://file/home/user/adls.jceks]
-    hdfs://<NameNode Hostname>:9001/user/foo/007020615
-    adl://<Account Name>.azuredatalakestore.net/testDir/
+    [-D fs.adl.oauth2.access.token.provider.type=RefreshToken
+     -D hadoop.security.credential.provider.path=localjceks://file/home/user/adls.jceks]
+    hdfs://<NameNode Hostname>:9001/user/foo/srcDir
+    adl://<Account Name>.azuredatalakestore.net/tgtDir/
 ```
 
 NOTE: You may optionally add the provider path property to the `distcp` command
@@ -241,9 +329,45 @@ Add the following properties to `core-site.xml`
   </description>
 </property>
 ```
+## Configurations for different ADL accounts
+Different ADL accounts can be accessed with different ADL client configurations.
+This also allows for different login details.
+
+1. All `fs.adl` options can be set on a per account basis.
+1. The account specific option is set by replacing the `fs.adl.` prefix on an option
+with `fs.adl.account.ACCOUNTNAME.`, where `ACCOUNTNAME` is the name of the account.
+1. When connecting to an account, all options explicitly set will override
+the base `fs.adl.` values.
+
+As an example, a configuration could have a base configuration to use the public account
+`adl://<some-public-account>.azuredatalakestore.net/` and an account-specific configuration
+to use some private account `adl://myprivateaccount.azuredatalakestore.net/`
+
+```xml
+<property>
+  <name>fs.adl.oauth2.client.id</name>
+  <value>CLIENTID</value>
+</property>
+
+<property>
+  <name>fs.adl.oauth2.credential</name>
+  <value>CREDENTIAL</value>
+</property>
+
+<property>
+  <name>fs.adl.account.myprivateaccount.oauth2.client.id</name>
+  <value>CLIENTID1</value>
+</property>
+
+<property>
+  <name>fs.adl.account.myprivateaccount.oauth2.credential</name>
+  <value>CREDENTIAL1</value>
+</property>
+```
+
 ## Testing the azure-datalake-store Module
 The `hadoop-azure` module includes a full suite of unit tests.
-Most of the tests will run without additional configuration by running mvn test.
+Most of the tests will run without additional configuration by running `mvn test`.
 This includes tests against mocked storage, which is an in-memory emulation of Azure Data Lake Storage.
 
 A selection of tests can run against the Azure Data Lake Storage. To run these
@@ -252,7 +376,7 @@ information mentioned in the above sections and the following properties.
 
 ```xml
 <property>
-    <name>dfs.adl.test.contract.enable</name>
+    <name>fs.adl.test.contract.enable</name>
     <value>true</value>
 </property>
 

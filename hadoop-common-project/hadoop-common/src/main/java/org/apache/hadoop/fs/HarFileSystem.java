@@ -17,14 +17,15 @@
  */
 package org.apache.hadoop.fs;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.fs.Options.HandleOpt;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.util.LineReader;
 import org.apache.hadoop.util.Progressable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.EOFException;
 import java.io.FileNotFoundException;
@@ -34,6 +35,8 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.util.*;
+
+import static org.apache.hadoop.fs.impl.PathCapabilitiesSupport.validatePathCapabilityArgs;
 
 /**
  * This is an implementation of the Hadoop Archive 
@@ -50,7 +53,8 @@ import java.util.*;
 
 public class HarFileSystem extends FileSystem {
 
-  private static final Log LOG = LogFactory.getLog(HarFileSystem.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(HarFileSystem.class);
 
   public static final String METADATA_CACHE_ENTRIES_KEY = "fs.har.metadatacache.entries";
   public static final int METADATA_CACHE_ENTRIES_DEFAULT = 10;
@@ -81,7 +85,7 @@ public class HarFileSystem extends FileSystem {
 
   /**
    * Return the protocol scheme for the FileSystem.
-   * <p/>
+   * <p>
    *
    * @return <code>har</code>
    */
@@ -698,6 +702,19 @@ public class HarFileSystem extends FileSystem {
         hstatus.getStartIndex(), hstatus.getLength(), bufferSize);
   }
 
+  @Override
+  protected PathHandle createPathHandle(FileStatus stat, HandleOpt... opts) {
+    // har consistency managed through metadata cache
+    // could extend HarMetaData to track more explicitly
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public FSDataInputStream open(PathHandle fd, int bufferSize)
+      throws IOException {
+    throw new UnsupportedOperationException();
+  }
+
   /**
    * Used for delegation token related functionality. Must delegate to
    * underlying file system.
@@ -884,7 +901,22 @@ public class HarFileSystem extends FileSystem {
     throws IOException {
     throw new IOException("Har: setPermission not allowed");
   }
-  
+
+  /**
+   * Declare that this filesystem connector is always read only.
+   * {@inheritDoc}
+   */
+  @Override
+  public boolean hasPathCapability(final Path path, final String capability)
+      throws IOException {
+    switch (validatePathCapabilityArgs(path, capability)) {
+    case CommonPathCapabilities.FS_READ_ONLY_CONNECTOR:
+      return true;
+    default:
+      return false;
+    }
+  }
+
   /**
    * Hadoop archives input stream. This input stream fakes EOF 
    * since archive files are part of bigger part files.
@@ -1173,7 +1205,7 @@ public class HarFileSystem extends FileSystem {
         LOG.warn("Encountered exception ", ioe);
         throw ioe;
       } finally {
-        IOUtils.cleanup(LOG, lin, in);
+        IOUtils.cleanupWithLogger(LOG, lin, in);
       }
 
       FSDataInputStream aIn = fs.open(archiveIndexPath);
@@ -1198,7 +1230,7 @@ public class HarFileSystem extends FileSystem {
           }
         }
       } finally {
-        IOUtils.cleanup(LOG, aIn);
+        IOUtils.cleanupWithLogger(LOG, aIn);
       }
     }
   }
@@ -1267,5 +1299,15 @@ public class HarFileSystem extends FileSystem {
   @Override
   public short getDefaultReplication(Path f) {
     return fs.getDefaultReplication(f);
+  }
+
+  @Override
+  public FSDataOutputStreamBuilder createFile(Path path) {
+    return fs.createFile(path);
+  }
+
+  @Override
+  public FSDataOutputStreamBuilder appendFile(Path path) {
+    return fs.appendFile(path);
   }
 }

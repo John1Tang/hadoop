@@ -17,7 +17,9 @@
  */
 package org.apache.hadoop.fs.viewfs;
 
+import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.security.PrivilegedExceptionAction;
@@ -27,20 +29,26 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Random;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.BlockStoragePolicySpi;
+import org.apache.hadoop.fs.ContentSummary;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.FsConstants;
 import org.apache.hadoop.fs.FsStatus;
+import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
+import org.apache.hadoop.fs.TestFileUtil;
 import org.apache.hadoop.fs.Trash;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
+import org.apache.hadoop.fs.contract.ContractTestUtils;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.AclUtil;
@@ -51,7 +59,10 @@ import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.Assume;
+import org.junit.Rule;
+import org.junit.rules.TemporaryFolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import static org.apache.hadoop.fs.FileSystemTestHelper.*;
@@ -62,9 +73,10 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import static org.apache.hadoop.test.GenericTestUtils.assertExceptionContains;
 import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.CoreMatchers.equalTo;
 import static org.junit.Assert.*;
-
 
 /**
  * <p>
@@ -102,6 +114,9 @@ abstract public class ViewFileSystemBaseTest {
   protected FileSystemTestHelper createFileSystemHelper() {
     return new FileSystemTestHelper();
   }
+
+  @Rule
+  public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Before
   public void setUp() throws Exception {
@@ -251,7 +266,7 @@ abstract public class ViewFileSystemBaseTest {
         fsTarget.isFile(new Path(targetTestRoot,"user/foo")));
     
     // Delete the created file
-    Assert.assertTrue("Delete should suceed",
+    Assert.assertTrue("Delete should succeed",
         fsView.delete(new Path("/user/foo"), false));
     Assert.assertFalse("File should not exist after delete",
         fsView.exists(new Path("/user/foo")));
@@ -266,7 +281,7 @@ abstract public class ViewFileSystemBaseTest {
         fsTarget.isFile(new Path(targetTestRoot,"dir2/foo")));
     
     // Delete the created file
-    Assert.assertTrue("Delete should suceed",
+    Assert.assertTrue("Delete should succeed",
         fsView.delete(new Path("/internalDir/linkToDir2/foo"), false));
     Assert.assertFalse("File should not exist after delete",
         fsView.exists(new Path("/internalDir/linkToDir2/foo")));
@@ -366,28 +381,83 @@ abstract public class ViewFileSystemBaseTest {
   }
   
   // rename across mount points that point to same target also fail 
-  @Test(expected=IOException.class) 
+  @Test
   public void testRenameAcrossMounts1() throws IOException {
     fileSystemTestHelper.createFile(fsView, "/user/foo");
-    fsView.rename(new Path("/user/foo"), new Path("/user2/fooBarBar"));
-    /* - code if we had wanted this to suceed
-    Assert.assertFalse(fSys.exists(new Path("/user/foo")));
-    Assert.assertFalse(fSysLocal.exists(new Path(targetTestRoot,"user/foo")));
-    Assert.assertTrue(fSys.isFile(FileSystemTestHelper.getTestRootPath(fSys,"/user2/fooBarBar")));
-    Assert.assertTrue(fSysLocal.isFile(new Path(targetTestRoot,"user/fooBarBar")));
-    */
+    try {
+      fsView.rename(new Path("/user/foo"), new Path("/user2/fooBarBar"));
+      ContractTestUtils.fail("IOException is not thrown on rename operation");
+    } catch (IOException e) {
+      GenericTestUtils
+          .assertExceptionContains("Renames across Mount points not supported",
+              e);
+    }
   }
   
   
   // rename across mount points fail if the mount link targets are different
   // even if the targets are part of the same target FS
 
-  @Test(expected=IOException.class) 
+  @Test
   public void testRenameAcrossMounts2() throws IOException {
     fileSystemTestHelper.createFile(fsView, "/user/foo");
-    fsView.rename(new Path("/user/foo"), new Path("/data/fooBar"));
+    try {
+      fsView.rename(new Path("/user/foo"), new Path("/data/fooBar"));
+      ContractTestUtils.fail("IOException is not thrown on rename operation");
+    } catch (IOException e) {
+      GenericTestUtils
+          .assertExceptionContains("Renames across Mount points not supported",
+              e);
+    }
   }
-  
+
+  // RenameStrategy SAME_TARGET_URI_ACROSS_MOUNTPOINT enabled
+  // to rename across mount points that point to same target URI
+  @Test
+  public void testRenameAcrossMounts3() throws IOException {
+    Configuration conf2 = new Configuration(conf);
+    conf2.set(Constants.CONFIG_VIEWFS_RENAME_STRATEGY,
+        ViewFileSystem.RenameStrategy.SAME_TARGET_URI_ACROSS_MOUNTPOINT
+            .toString());
+    FileSystem fsView2 = FileSystem.newInstance(FsConstants.VIEWFS_URI, conf2);
+    fileSystemTestHelper.createFile(fsView2, "/user/foo");
+    fsView2.rename(new Path("/user/foo"), new Path("/user2/fooBarBar"));
+    ContractTestUtils
+        .assertPathDoesNotExist(fsView2, "src should not exist after rename",
+            new Path("/user/foo"));
+    ContractTestUtils
+        .assertPathDoesNotExist(fsTarget, "src should not exist after rename",
+            new Path(targetTestRoot, "user/foo"));
+    ContractTestUtils.assertIsFile(fsView2,
+        fileSystemTestHelper.getTestRootPath(fsView2, "/user2/fooBarBar"));
+    ContractTestUtils
+        .assertIsFile(fsTarget, new Path(targetTestRoot, "user/fooBarBar"));
+  }
+
+  // RenameStrategy SAME_FILESYSTEM_ACROSS_MOUNTPOINT enabled
+  // to rename across mount points where the mount link targets are different
+  // but are part of the same target FS
+  @Test
+  public void testRenameAcrossMounts4() throws IOException {
+    Configuration conf2 = new Configuration(conf);
+    conf2.set(Constants.CONFIG_VIEWFS_RENAME_STRATEGY,
+        ViewFileSystem.RenameStrategy.SAME_FILESYSTEM_ACROSS_MOUNTPOINT
+            .toString());
+    FileSystem fsView2 = FileSystem.newInstance(FsConstants.VIEWFS_URI, conf2);
+    fileSystemTestHelper.createFile(fsView2, "/user/foo");
+    fsView2.rename(new Path("/user/foo"), new Path("/data/fooBar"));
+    ContractTestUtils
+        .assertPathDoesNotExist(fsView2, "src should not exist after rename",
+            new Path("/user/foo"));
+    ContractTestUtils
+        .assertPathDoesNotExist(fsTarget, "src should not exist after rename",
+            new Path(targetTestRoot, "user/foo"));
+    ContractTestUtils.assertIsFile(fsView2,
+        fileSystemTestHelper.getTestRootPath(fsView2, "/data/fooBar"));
+    ContractTestUtils
+        .assertIsFile(fsTarget, new Path(targetTestRoot, "data/fooBar"));
+  }
+
   static protected boolean SupportsBlocks = false; //  local fs use 1 block
                                                    // override for HDFS
   @Test
@@ -416,10 +486,10 @@ abstract public class ViewFileSystemBaseTest {
     Assert.assertEquals(targetBL.length, viewBL.length);
     int i = 0;
     for (BlockLocation vbl : viewBL) {
-      Assert.assertEquals(vbl.toString(), targetBL[i].toString());
-      Assert.assertEquals(targetBL[i].getOffset(), vbl.getOffset());
-      Assert.assertEquals(targetBL[i].getLength(), vbl.getLength());
-      i++;     
+      assertThat(vbl.toString(), equalTo(targetBL[i].toString()));
+      assertThat(vbl.getOffset(), equalTo(targetBL[i].getOffset()));
+      assertThat(vbl.getLength(), equalTo(targetBL[i].getLength()));
+      i++;
     } 
   }
 
@@ -911,6 +981,11 @@ abstract public class ViewFileSystemBaseTest {
     fsView.unsetStoragePolicy(new Path("/internalDir"));
   }
 
+  @Test(expected = AccessControlException.class)
+  public void testInternalSatisfyStoragePolicy() throws IOException {
+    fsView.satisfyStoragePolicy(new Path("/internalDir"));
+  }
+
   @Test(expected = NotInMountpointException.class)
   public void testInternalgetStoragePolicy() throws IOException {
     fsView.getStoragePolicy(new Path("/internalDir"));
@@ -948,8 +1023,8 @@ abstract public class ViewFileSystemBaseTest {
           + mtPrefix + Constants.CONFIG_VIEWFS_LINK + "." + "/");
     } catch (Exception e) {
       if (e instanceof UnsupportedFileSystemException) {
-        String msg = Constants.CONFIG_VIEWFS_LINK_MERGE_SLASH
-            + " is not supported yet.";
+        String msg = " Use " + Constants.CONFIG_VIEWFS_LINK_MERGE_SLASH +
+            " instead";
         assertThat(e.getMessage(), containsString(msg));
       } else {
         fail("Unexpected exception: " + e.getMessage());
@@ -1208,6 +1283,151 @@ abstract public class ViewFileSystemBaseTest {
       LOG.info("Expected exception: " + e);
       assertThat(e.getMessage(),
           containsString("File does not exist:"));
+    }
+  }
+
+  @Test
+  public void testViewFileSystemInnerCache() throws Exception {
+    ViewFileSystem.InnerCache cache =
+        new ViewFileSystem.InnerCache(new FsGetter());
+    FileSystem fs = cache.get(fsTarget.getUri(), conf);
+
+    // InnerCache caches filesystem.
+    assertSame(fs, cache.get(fsTarget.getUri(), conf));
+
+    // InnerCache and FileSystem.CACHE are independent.
+    assertNotSame(fs, FileSystem.get(fsTarget.getUri(), conf));
+
+    // close InnerCache.
+    cache.closeAll();
+    try {
+      fs.exists(new Path("/"));
+      if (!(fs instanceof LocalFileSystem)) {
+        // Ignore LocalFileSystem because it can still be used after close.
+        fail("Expect Filesystem closed exception");
+      }
+    } catch (IOException e) {
+      assertExceptionContains("Filesystem closed", e);
+    }
+  }
+
+  @Test
+  public void testCloseChildrenFileSystem() throws Exception {
+    final String clusterName = "cluster" + new Random().nextInt();
+    Configuration config = new Configuration(conf);
+    ConfigUtil.addLink(config, clusterName, "/user",
+        new Path(targetTestRoot, "user").toUri());
+    config.setBoolean("fs.viewfs.impl.disable.cache", false);
+    URI uri = new URI("viewfs://" + clusterName + "/");
+
+    ViewFileSystem viewFs = (ViewFileSystem) FileSystem.get(uri, config);
+    assertTrue("viewfs should have at least one child fs.",
+        viewFs.getChildFileSystems().length > 0);
+    // viewFs is cached in FileSystem.CACHE
+    assertSame(viewFs, FileSystem.get(uri, config));
+
+    // child fs is not cached in FileSystem.CACHE
+    FileSystem child = viewFs.getChildFileSystems()[0];
+    assertNotSame(child, FileSystem.get(child.getUri(), config));
+
+    viewFs.close();
+    for (FileSystem childfs : viewFs.getChildFileSystems()) {
+      try {
+        childfs.exists(new Path("/"));
+        if (!(childfs instanceof LocalFileSystem)) {
+          // Ignore LocalFileSystem because it can still be used after close.
+          fail("Expect Filesystem closed exception");
+        }
+      } catch (IOException e) {
+        assertExceptionContains("Filesystem closed", e);
+      }
+    }
+  }
+
+  @Test
+  public void testChildrenFileSystemLeak() throws Exception {
+    final String clusterName = "cluster" + new Random().nextInt();
+    Configuration config = new Configuration(conf);
+    ConfigUtil.addLink(config, clusterName, "/user",
+        new Path(targetTestRoot, "user").toUri());
+
+    final int cacheSize = TestFileUtil.getCacheSize();
+    ViewFileSystem viewFs = (ViewFileSystem) FileSystem
+        .get(new URI("viewfs://" + clusterName + "/"), config);
+    assertEquals(cacheSize + 1, TestFileUtil.getCacheSize());
+    viewFs.close();
+    assertEquals(cacheSize, TestFileUtil.getCacheSize());
+  }
+
+  @Test
+  public void testDeleteOnExit() throws Exception {
+    final String clusterName = "cluster" + new Random().nextInt();
+    Configuration config = new Configuration(conf);
+    ConfigUtil.addLink(config, clusterName, "/user",
+        new Path(targetTestRoot, "user").toUri());
+
+    Path testDir = new Path("/user/testDeleteOnExit");
+    Path realTestPath = new Path(targetTestRoot, "user/testDeleteOnExit");
+    ViewFileSystem viewFs = (ViewFileSystem) FileSystem
+        .get(new URI("viewfs://" + clusterName + "/"), config);
+    viewFs.mkdirs(testDir);
+    assertTrue(viewFs.exists(testDir));
+    assertTrue(fsTarget.exists(realTestPath));
+
+    viewFs.deleteOnExit(testDir);
+    viewFs.close();
+    assertFalse(fsTarget.exists(realTestPath));
+  }
+
+  @Test
+  public void testGetContentSummary() throws IOException {
+    ContentSummary summaryBefore =
+        fsView.getContentSummary(new Path("/internalDir"));
+    String expected = "GET CONTENT SUMMARY";
+    Path filePath =
+        new Path("/internalDir/internalDir2/linkToDir3", "foo");
+
+    try (FSDataOutputStream outputStream = fsView.create(filePath)) {
+      outputStream.write(expected.getBytes());
+    }
+
+    Path newDirPath = new Path("/internalDir/linkToDir2", "bar");
+    fsView.mkdirs(newDirPath);
+
+    ContentSummary summaryAfter =
+        fsView.getContentSummary(new Path("/internalDir"));
+    assertEquals("The file count didn't match",
+        summaryBefore.getFileCount() + 1,
+        summaryAfter.getFileCount());
+    assertEquals("The size didn't match",
+        summaryBefore.getLength() + expected.length(),
+        summaryAfter.getLength());
+    assertEquals("The directory count didn't match",
+        summaryBefore.getDirectoryCount() + 1,
+        summaryAfter.getDirectoryCount());
+  }
+
+  @Test
+  public void testGetContentSummaryWithFileInLocalFS() throws Exception {
+    ContentSummary summaryBefore =
+        fsView.getContentSummary(new Path("/internalDir"));
+    String expected = "GET CONTENT SUMMARY";
+    File localFile = temporaryFolder.newFile("localFile");
+    try (FileOutputStream fos = new FileOutputStream(localFile)) {
+      fos.write(expected.getBytes());
+    }
+    ConfigUtil.addLink(conf,
+        "/internalDir/internalDir2/linkToLocalFile", localFile.toURI());
+
+    try (FileSystem fs = FileSystem.get(FsConstants.VIEWFS_URI, conf)) {
+      ContentSummary summaryAfter =
+          fs.getContentSummary(new Path("/internalDir"));
+      assertEquals("The file count didn't match",
+          summaryBefore.getFileCount() + 1,
+          summaryAfter.getFileCount());
+      assertEquals("The directory count didn't match",
+          summaryBefore.getLength() + expected.length(),
+          summaryAfter.getLength());
     }
   }
 }

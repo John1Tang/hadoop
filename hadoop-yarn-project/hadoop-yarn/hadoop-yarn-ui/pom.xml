@@ -16,25 +16,24 @@
 -->
 
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/maven-v4_0_0.xsd">
   <parent>
     <artifactId>hadoop-yarn</artifactId>
     <groupId>org.apache.hadoop</groupId>
-    <version>3.0.0-alpha3-SNAPSHOT</version>
+    <version>3.4.0-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
   <artifactId>hadoop-yarn-ui</artifactId>
-  <version>3.0.0-alpha3-SNAPSHOT</version>
+  <version>3.4.0-SNAPSHOT</version>
   <name>Apache Hadoop YARN UI</name>
-  <packaging>${packaging.type}</packaging>
+  <packaging>${packagingType}</packaging>
 
   <properties>
-    <packaging.type>pom</packaging.type>
-    <webappTgtDir>${basedir}/target/src/main/webapp</webappTgtDir>
-    <node.executable>${basedir}/target/src/main/webapp/node/node</node.executable>
-    <nodeVersion>v4.4.5</nodeVersion>
-    <npmVersion>2.15.5</npmVersion>
-    <keep-ui-build-cache>false</keep-ui-build-cache>
+    <packagingType>pom</packagingType>
+    <webappDir>${basedir}/target/webapp</webappDir>
+    <nodeExecutable>${basedir}/target/webapp/node/node</nodeExecutable>
+    <packageManagerScript>node/yarn/dist/bin/yarn.js</packageManagerScript>
+    <keepUIBuildCache>false</keepUIBuildCache>
   </properties>
 
   <build>
@@ -47,7 +46,9 @@
           <excludes>
             <exclude>src/main/webapp/jsconfig.json</exclude>
             <exclude>src/main/webapp/bower.json</exclude>
+            <exclude>src/main/webapp/bower-shrinkwrap.json</exclude>
             <exclude>src/main/webapp/package.json</exclude>
+            <exclude>src/main/webapp/yarn.lock</exclude>
             <exclude>src/main/webapp/testem.json</exclude>
             <exclude>src/main/webapp/public/assets/images/**/*</exclude>
             <exclude>src/main/webapp/public/assets/images/*</exclude>
@@ -57,22 +58,22 @@
             <exclude>src/main/webapp/.ember-cli</exclude>
             <exclude>src/main/webapp/.jshintrc</exclude>
             <exclude>src/main/webapp/.watchmanconfig</exclude>
+            <exclude>src/main/webapp/WEB-INF/wro.xml</exclude>
           </excludes>
         </configuration>
       </plugin>
 
       <plugin>
         <artifactId>maven-clean-plugin</artifactId>
-        <version>3.0.0</version>
         <configuration>
-          <skip>${keep-ui-build-cache}</skip>
+          <skip>${keepUIBuildCache}</skip>
           <followSymLinks>false</followSymLinks>
           <filesets>
             <fileset>
-              <directory>${webappTgtDir}/bower_components</directory>
+              <directory>${webappDir}/bower_components</directory>
             </fileset>
             <fileset>
-              <directory>${webappTgtDir}/node_modules</directory>
+              <directory>${webappDir}/node_modules</directory>
             </fileset>
           </filesets>
         </configuration>
@@ -89,65 +90,120 @@
       </activation>
 
       <properties>
-        <packaging.type>war</packaging.type>
+        <packagingType>war</packagingType>
       </properties>
 
       <build>
         <plugins>
-          <!-- prepare source code -->
+          <!-- Copy files into target for build -->
           <plugin>
-            <groupId>org.apache.maven.plugins</groupId>
-            <artifactId>maven-antrun-plugin</artifactId>
+            <artifactId>maven-resources-plugin</artifactId>
             <executions>
               <execution>
-                <id>prepare-source-code</id>
-                <phase>generate-sources</phase>
+                <id>copy-resources</id>
+                <!-- here the phase you need -->
+                <phase>validate</phase>
                 <goals>
-                  <goal>run</goal>
+                  <goal>copy-resources</goal>
                 </goals>
                 <configuration>
-                  <target>
-                    <copy toDir="${basedir}/target/src/main/webapp">
-                      <fileset dir="${basedir}/src/main/webapp"/>
-                    </copy>
-
-                    <copy toDir="${basedir}/target/src/public">
-                      <fileset dir="${basedir}/public"/>
-                    </copy>
-                  </target>
+                  <outputDirectory>${webappDir}</outputDirectory>
+                  <resources>
+                    <resource>
+                      <directory>${basedir}/src/main/webapp</directory>
+                      <filtering>true</filtering>
+                      <excludes>
+                        <exclude>node_modules/**/*</exclude>
+                        <exclude>bower_components/**/*</exclude>
+                        <exclude>tmp/**/*</exclude>
+                        <exclude>dist/**/*</exclude>
+                        <exclude>terminal/**/*</exclude>
+                      </excludes>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+              <execution>
+                <id>copy-terminal</id>
+                <!-- here the phase you need -->
+                <phase>compile</phase>
+                <goals>
+                  <goal>copy-resources</goal>
+                </goals>
+                <configuration>
+                  <outputDirectory>${webappDir}/dist</outputDirectory>
+                  <resources>
+                    <resource>
+                      <directory>${basedir}/src/main/webapp</directory>
+                      <filtering>true</filtering>
+                      <includes>
+                        <include>terminal/**/*</include>
+                      </includes>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+              <execution>
+                <id>copy-xterm</id>
+                <!-- here the phase you need -->
+                <phase>compile</phase>
+                <goals>
+                  <goal>copy-resources</goal>
+                </goals>
+                <configuration>
+                  <outputDirectory>${webappDir}/dist/terminal/xterm</outputDirectory>
+                  <resources>
+                    <resource>
+                      <directory>${basedir}/target/webapp/node_modules/xterm</directory>
+                      <filtering>true</filtering>
+                      <includes>
+                        <include>dist/**/*</include>
+                      </includes>
+                    </resource>
+                  </resources>
                 </configuration>
               </execution>
             </executions>
           </plugin>
 
+          <!-- Install Node, Yarn, Bower & dependencies -->
           <plugin>
             <groupId>com.github.eirslett</groupId>
             <artifactId>frontend-maven-plugin</artifactId>
+            <version>${frontend-maven-plugin.version}</version>
             <configuration>
-              <workingDirectory>${webappTgtDir}</workingDirectory>
+              <workingDirectory>${webappDir}</workingDirectory>
             </configuration>
             <executions>
+
+              <!-- Install all dependencies -->
               <execution>
-                <phase>generate-sources</phase>
-                <id>install node and npm</id>
+                <phase>generate-resources</phase>
+                <id>install node and yarn</id>
                 <goals>
-                  <goal>install-node-and-npm</goal>
+                  <goal>install-node-and-yarn</goal>
                 </goals>
                 <configuration>
-                  <nodeVersion>${nodeVersion}</nodeVersion>
-                  <npmVersion>${npmVersion}</npmVersion>
+                  <nodeVersion>v10.21.0</nodeVersion>
+                  <yarnVersion>v1.21.1</yarnVersion>
                 </configuration>
               </execution>
               <execution>
-                <phase>generate-sources</phase>
-                <id>npm install</id>
+                <phase>generate-resources</phase>
+                <id>yarn install</id>
                 <goals>
-                  <goal>npm</goal>
+                  <goal>yarn</goal>
                 </goals>
+                <configuration>
+                  <arguments>install</arguments>
+                </configuration>
               </execution>
               <execution>
-                <phase>generate-sources</phase>
+                <phase>generate-resources</phase>
                 <id>bower install</id>
+                <configuration>
+                  <arguments>install</arguments>
+                </configuration>
                 <goals>
                   <goal>bower</goal>
                 </goals>
@@ -155,38 +211,88 @@
             </executions>
           </plugin>
 
-
-          <!-- Bower install & grunt build-->
           <plugin>
-            <artifactId>exec-maven-plugin</artifactId>
             <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
             <executions>
+
+              <!-- Ember Build -->
               <execution>
                 <id>ember build</id>
-                <phase>generate-sources</phase>
+                <phase>generate-resources</phase>
                 <goals>
                   <goal>exec</goal>
                 </goals>
                 <configuration>
-                  <workingDirectory>${webappTgtDir}</workingDirectory>
-                  <executable>${node.executable}</executable>
+                  <workingDirectory>${webappDir}</workingDirectory>
+                  <executable>${nodeExecutable}</executable>
                   <arguments>
-                    <argument>node/npm/bin/npm-cli</argument>
+                    <argument>${packageManagerScript}</argument>
                     <argument>run</argument>
                     <argument>build:mvn</argument>
                   </arguments>
                 </configuration>
               </execution>
+
             </executions>
+          </plugin>
+
+          <!-- Asset minifier -->
+          <plugin>
+            <groupId>ro.isdc.wro4j</groupId>
+            <artifactId>wro4j-maven-plugin</artifactId>
+            <version>1.7.9</version>
+            <dependencies>
+              <!-- TODO: Remove this dependency after upgrading wro4j-maven-plugin to 1.8.1 or later. -->
+              <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-core</artifactId>
+                <version>2.18.0</version>
+              </dependency>
+            </dependencies>
+            <executions>
+              <execution>
+                <phase>prepare-package</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+              </execution>
+            </executions>
+            <configuration>
+              <minimize>true</minimize>
+              <targetGroups>yarn-ui,vendor</targetGroups>
+              <destinationFolder>${basedir}/target/minified-resources/assets</destinationFolder>
+              <contextFolder>${webappDir}/dist/assets</contextFolder>
+              <wroFile>${webappDir}/WEB-INF/wro.xml</wroFile>
+            </configuration>
           </plugin>
 
           <!-- Package into war -->
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-war-plugin</artifactId>
+            <executions>
+              <execution>
+                <phase>package</phase>
+              </execution>
+            </executions>
             <configuration>
-              <webXml>${basedir}/src/main/webapp/WEB-INF/web.xml</webXml>
-              <warSourceDirectory>${webappTgtDir}/dist</warSourceDirectory>
+              <webXml>${webappDir}/WEB-INF/web.xml</webXml>
+              <warSourceDirectory>${webappDir}/dist</warSourceDirectory>
+              <webResources>
+                <resource>
+                  <filtering>false</filtering>
+                  <directory>${basedir}/target/minified-resources</directory>
+                </resource>
+              </webResources>
+            </configuration>
+          </plugin>
+
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-jar-plugin</artifactId>
+            <configuration>
+              <skipIfEmpty>true</skipIfEmpty>
             </configuration>
           </plugin>
 
@@ -194,4 +300,5 @@
       </build>
     </profile>
   </profiles>
+
 </project>

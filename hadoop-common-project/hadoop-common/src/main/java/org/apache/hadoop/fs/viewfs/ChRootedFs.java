@@ -101,8 +101,7 @@ class ChRootedFs extends AbstractFileSystem {
 
   public ChRootedFs(final AbstractFileSystem fs, final Path theRoot)
     throws URISyntaxException {
-    super(fs.getUri(), fs.getUri().getScheme(),
-        fs.getUri().getAuthority() != null, fs.getUriDefaultPort());
+    super(fs.getUri(), fs.getUri().getScheme(), false, fs.getUriDefaultPort());
     myFs = fs;
     myFs.checkPath(theRoot);
     chRootPathPart = new Path(myFs.getUriPath(theRoot));
@@ -133,7 +132,7 @@ class ChRootedFs extends AbstractFileSystem {
    * Strip out the root from the path.
    * 
    * @param p - fully qualified path p
-   * @return -  the remaining path  without the begining /
+   * @return -  the remaining path  without the beginning /
    */
   public String stripOutRoot(final Path p) {
     try {
@@ -223,8 +222,14 @@ class ChRootedFs extends AbstractFileSystem {
   }
 
   @Override
+  @Deprecated
   public FsServerDefaults getServerDefaults() throws IOException {
     return myFs.getServerDefaults();
+  }
+
+  @Override
+  public FsServerDefaults getServerDefaults(final Path f) throws IOException {
+    return myFs.getServerDefaults(fullPath(f));
   }
 
   @Override
@@ -391,6 +396,11 @@ class ChRootedFs extends AbstractFileSystem {
   public void deleteSnapshot(Path snapshotDir, String snapshotName)
       throws IOException {
     myFs.deleteSnapshot(fullPath(snapshotDir), snapshotName);
+  }
+
+  @Override
+  public void satisfyStoragePolicy(final Path path) throws IOException {
+    myFs.satisfyStoragePolicy(path);
   }
 
   @Override

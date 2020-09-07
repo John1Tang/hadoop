@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.atomic.LongAdder;
 
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.util.LightWeightLinkedSet;
@@ -85,7 +86,16 @@ class LowRedundancyBlocks implements Iterable<BlockInfo> {
       = new ArrayList<>(LEVEL);
 
   /** The number of corrupt blocks with replication factor 1 */
-  private int corruptReplOneBlocks = 0;
+
+  private final LongAdder lowRedundancyBlocks = new LongAdder();
+  private final LongAdder corruptBlocks = new LongAdder();
+  private final LongAdder corruptReplicationOneBlocks = new LongAdder();
+  private final LongAdder lowRedundancyECBlockGroups = new LongAdder();
+  private final LongAdder corruptECBlockGroups = new LongAdder();
+  private final LongAdder highestPriorityLowRedundancyReplicatedBlocks
+      = new LongAdder();
+  private final LongAdder highestPriorityLowRedundancyECBlocks
+      = new LongAdder();
 
   /** Create an object. */
   LowRedundancyBlocks() {
@@ -101,7 +111,11 @@ class LowRedundancyBlocks implements Iterable<BlockInfo> {
     for (int i = 0; i < LEVEL; i++) {
       priorityQueues.get(i).clear();
     }
-    corruptReplOneBlocks = 0;
+    lowRedundancyBlocks.reset();
+    corruptBlocks.reset();
+    corruptReplicationOneBlocks.reset();
+    lowRedundancyECBlockGroups.reset();
+    corruptECBlockGroups.reset();
   }
 
   /** Return the total number of insufficient redundancy blocks. */
@@ -133,8 +147,47 @@ class LowRedundancyBlocks implements Iterable<BlockInfo> {
   }
 
   /** Return the number of corrupt blocks with replication factor 1 */
-  synchronized int getCorruptReplOneBlockSize() {
-    return corruptReplOneBlocks;
+  long getCorruptReplicationOneBlockSize() {
+    return getCorruptReplicationOneBlocks();
+  }
+
+  /**
+   * Return under replicated block count excluding corrupt replicas.
+   */
+  long getLowRedundancyBlocks() {
+    return lowRedundancyBlocks.longValue() - getCorruptBlocks();
+  }
+
+  long getCorruptBlocks() {
+    return corruptBlocks.longValue();
+  }
+
+  long getCorruptReplicationOneBlocks() {
+    return corruptReplicationOneBlocks.longValue();
+  }
+
+  /** Return the number of under replicated blocks
+   * with the highest priority to recover */
+  long getHighestPriorityReplicatedBlockCount() {
+    return highestPriorityLowRedundancyReplicatedBlocks.longValue();
+  }
+
+  /** Return the number of under replicated EC blocks
+   * with the highest priority to recover */
+  long getHighestPriorityECBlockCount() {
+    return highestPriorityLowRedundancyECBlocks.longValue();
+  }
+
+  /**
+   *  Return low redundancy striped blocks excluding corrupt blocks.
+   */
+  long getLowRedundancyECBlockGroups() {
+    return lowRedundancyECBlockGroups.longValue() -
+        getCorruptECBlockGroups();
+  }
+
+  long getCorruptECBlockGroups() {
+    return corruptECBlockGroups.longValue();
   }
 
   /** Check if a block is in the neededReconstruction queue. */
@@ -236,11 +289,7 @@ class LowRedundancyBlocks implements Iterable<BlockInfo> {
       int outOfServiceReplicas, int expectedReplicas) {
     final int priLevel = getPriority(block, curReplicas, readOnlyReplicas,
         outOfServiceReplicas, expectedReplicas);
-    if(priorityQueues.get(priLevel).add(block)) {
-      if (priLevel == QUEUE_WITH_CORRUPT_BLOCKS &&
-          expectedReplicas == 1) {
-        corruptReplOneBlocks++;
-      }
+    if(add(block, priLevel, expectedReplicas)) {
       NameNode.blockStateChangeLog.debug(
           "BLOCK* NameSystem.LowRedundancyBlock.add: {}"
               + " has only {} replicas and need {} replicas so is added to"
@@ -252,18 +301,49 @@ class LowRedundancyBlocks implements Iterable<BlockInfo> {
     return false;
   }
 
+  private boolean add(BlockInfo blockInfo, int priLevel, int expectedReplicas) {
+    if (priorityQueues.get(priLevel).add(blockInfo)) {
+      incrementBlockStat(blockInfo, priLevel, expectedReplicas);
+      return true;
+    }
+    return false;
+  }
+
+  private void incrementBlockStat(BlockInfo blockInfo, int priLevel,
+      int expectedReplicas) {
+    if (blockInfo.isStriped()) {
+      lowRedundancyECBlockGroups.increment();
+      if (priLevel == QUEUE_WITH_CORRUPT_BLOCKS) {
+        corruptECBlockGroups.increment();
+      }
+      if (priLevel == QUEUE_HIGHEST_PRIORITY) {
+        highestPriorityLowRedundancyECBlocks.increment();
+      }
+    } else {
+      lowRedundancyBlocks.increment();
+      if (priLevel == QUEUE_WITH_CORRUPT_BLOCKS) {
+        corruptBlocks.increment();
+        if (expectedReplicas == 1) {
+          corruptReplicationOneBlocks.increment();
+        }
+      }
+      if (priLevel == QUEUE_HIGHEST_PRIORITY) {
+        highestPriorityLowRedundancyReplicatedBlocks.increment();
+      }
+    }
+  }
+
   /** Remove a block from a low redundancy queue. */
   synchronized boolean remove(BlockInfo block,
       int oldReplicas, int oldReadOnlyReplicas,
       int outOfServiceReplicas, int oldExpectedReplicas) {
     final int priLevel = getPriority(block, oldReplicas, oldReadOnlyReplicas,
         outOfServiceReplicas, oldExpectedReplicas);
-    boolean removedBlock = remove(block, priLevel);
+    boolean removedBlock = remove(block, priLevel, oldExpectedReplicas);
     if (priLevel == QUEUE_WITH_CORRUPT_BLOCKS &&
         oldExpectedReplicas == 1 &&
         removedBlock) {
-      corruptReplOneBlocks--;
-      assert corruptReplOneBlocks >= 0 :
+      assert corruptReplicationOneBlocks.longValue() >= 0 :
           "Number of corrupt blocks with replication factor 1 " +
               "should be non-negative";
     }
@@ -287,26 +367,60 @@ class LowRedundancyBlocks implements Iterable<BlockInfo> {
    *         queues
    */
   boolean remove(BlockInfo block, int priLevel) {
+    return remove(block, priLevel, block.getReplication());
+  }
+
+  boolean remove(BlockInfo block, int priLevel, int oldExpectedReplicas) {
     if(priLevel >= 0 && priLevel < LEVEL
         && priorityQueues.get(priLevel).remove(block)) {
       NameNode.blockStateChangeLog.debug(
           "BLOCK* NameSystem.LowRedundancyBlock.remove: Removing block {}"
               + " from priority queue {}",
           block, priLevel);
+      decrementBlockStat(block, priLevel, oldExpectedReplicas);
       return true;
     } else {
       // Try to remove the block from all queues if the block was
       // not found in the queue for the given priority level.
+      boolean found = false;
       for (int i = 0; i < LEVEL; i++) {
         if (i != priLevel && priorityQueues.get(i).remove(block)) {
           NameNode.blockStateChangeLog.debug(
               "BLOCK* NameSystem.LowRedundancyBlock.remove: Removing block" +
                   " {} from priority queue {}", block, i);
-          return true;
+          decrementBlockStat(block, i, oldExpectedReplicas);
+          found = true;
         }
       }
+      return found;
     }
-    return false;
+  }
+
+  private void decrementBlockStat(BlockInfo blockInfo, int priLevel,
+      int oldExpectedReplicas) {
+    if (blockInfo.isStriped()) {
+      lowRedundancyECBlockGroups.decrement();
+      if (priLevel == QUEUE_WITH_CORRUPT_BLOCKS) {
+        corruptECBlockGroups.decrement();
+      }
+      if (priLevel == QUEUE_HIGHEST_PRIORITY) {
+        highestPriorityLowRedundancyECBlocks.decrement();
+      }
+    } else {
+      lowRedundancyBlocks.decrement();
+      if (priLevel == QUEUE_WITH_CORRUPT_BLOCKS) {
+        corruptBlocks.decrement();
+        if (oldExpectedReplicas == 1) {
+          corruptReplicationOneBlocks.decrement();
+          assert corruptReplicationOneBlocks.longValue() >= 0 :
+              "Number of corrupt blocks with replication factor 1 " +
+                  "should be non-negative";
+        }
+      }
+      if (priLevel == QUEUE_HIGHEST_PRIORITY) {
+        highestPriorityLowRedundancyReplicatedBlocks.decrement();
+      }
+    }
   }
 
   /**
@@ -346,28 +460,16 @@ class LowRedundancyBlocks implements Iterable<BlockInfo> {
         " curPri  " + curPri +
         " oldPri  " + oldPri);
     }
-    if(oldPri != curPri) {
-      remove(block, oldPri);
-    }
-    if(priorityQueues.get(curPri).add(block)) {
+    // oldPri is mostly correct, but not always. If not found with oldPri,
+    // other levels will be searched until the block is found & removed.
+    remove(block, oldPri, oldExpectedReplicas);
+    if(add(block, curPri, curExpectedReplicas)) {
       NameNode.blockStateChangeLog.debug(
           "BLOCK* NameSystem.LowRedundancyBlock.update: {} has only {} "
               + "replicas and needs {} replicas so is added to "
               + "neededReconstructions at priority level {}",
           block, curReplicas, curExpectedReplicas, curPri);
 
-    }
-    if (oldPri != curPri || expectedReplicasDelta != 0) {
-      // corruptReplOneBlocks could possibly change
-      if (curPri == QUEUE_WITH_CORRUPT_BLOCKS &&
-          curExpectedReplicas == 1) {
-        // add a new corrupt block with replication factor 1
-        corruptReplOneBlocks++;
-      } else if (oldPri == QUEUE_WITH_CORRUPT_BLOCKS &&
-          curExpectedReplicas - expectedReplicasDelta == 1) {
-        // remove an existing corrupt block with replication factor 1
-        corruptReplOneBlocks--;
-      }
     }
   }
 
@@ -387,6 +489,28 @@ class LowRedundancyBlocks implements Iterable<BlockInfo> {
    */
   synchronized List<List<BlockInfo>> chooseLowRedundancyBlocks(
       int blocksToProcess) {
+    return chooseLowRedundancyBlocks(blocksToProcess, false);
+  }
+
+  /**
+   * Get a list of block lists without sufficient redundancy. The index of
+   * block lists represents its replication priority. Iterates each block list
+   * in priority order beginning with the highest priority list. Iterators use
+   * a bookmark to resume where the previous iteration stopped. Returns when
+   * the block count is met or iteration reaches the end of the lowest priority
+   * list, in which case bookmarks for each block list are reset to the heads
+   * of their respective lists.
+   *
+   * @param blocksToProcess - number of blocks to fetch from low redundancy
+   *          blocks.
+   * @param resetIterators - After gathering the list of blocks reset the
+   *           position of all queue iterators to the head of the queue so
+   *           subsequent calls will begin at the head of the queue
+   * @return Return a list of block lists to be replicated. The block list
+   *         index represents its redundancy priority.
+   */
+  synchronized List<List<BlockInfo>> chooseLowRedundancyBlocks(
+      int blocksToProcess, boolean resetIterators) {
     final List<List<BlockInfo>> blocksToReconstruct = new ArrayList<>(LEVEL);
 
     int count = 0;
@@ -408,7 +532,7 @@ class LowRedundancyBlocks implements Iterable<BlockInfo> {
       }
     }
 
-    if (priority == LEVEL) {
+    if (priority == LEVEL || resetIterators) {
       // Reset all bookmarks because there were no recently added blocks.
       for (LightWeightLinkedSet<BlockInfo> q : priorityQueues) {
         q.resetBookmark();

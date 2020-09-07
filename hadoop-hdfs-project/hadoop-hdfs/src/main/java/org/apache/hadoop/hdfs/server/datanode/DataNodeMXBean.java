@@ -75,6 +75,13 @@ public interface DataNodeMXBean {
   public String getNamenodeAddresses();
 
   /**
+   * Gets the datanode hostname.
+   *
+   * @return the datanode hostname for the datanode.
+   */
+  public String getDatanodeHostname();
+
+  /**
    * Gets information of the block pool service actors.
    *
    * @return block pool service actors info
@@ -97,10 +104,14 @@ public interface DataNodeMXBean {
   public String getClusterId();
 
   /**
-   * Returns an estimate of the number of Datanode threads
-   * actively transferring blocks.
+   * Returns the number of active xceivers.
    */
   public int getXceiverCount();
+
+  /**
+   * Returns the number of Datanode threads actively transferring blocks.
+   */
+  int getActiveTransferThreadCount();
 
   /**
    * Returns an estimate of the number of data replication/reconstruction tasks
@@ -139,4 +150,11 @@ public interface DataNodeMXBean {
    * @return list of slow disks
    */
   String getSlowDisks();
+
+  /**
+   * Gets if security is enabled.
+   *
+   * @return true, if security is enabled.
+   */
+  boolean isSecurityEnabled();
 }

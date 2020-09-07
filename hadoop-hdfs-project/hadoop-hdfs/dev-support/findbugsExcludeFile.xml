@@ -181,9 +181,31 @@
      <!-- More complex cleanup logic confuses findbugs -->
      <Match>
        <Class name="org.apache.hadoop.hdfs.qjournal.server.Journal" />
-       <Method name="persistPaxosData" />
-       <Bug pattern="OS_OPEN_STREAM" />
+       <Method name="getPersistedPaxosData" />
+       <Bug pattern="NP_NULL_PARAM_DEREF" />
      </Match>
+
+     <!-- guava 27.0 update: @Nullable is not detected, however it's there -->
+     <Match>
+       <Class name="org.apache.hadoop.hdfs.qjournal.server.Journal" />
+       <Method name="persistPaxosData" />
+       <Bug pattern="NP_NULL_PARAM_DEREF" />
+     </Match>
+
+
+     <!-- guava 27.0 update: @Nullable is not detected, however it's there -->
+     <Match>
+       <Class name="org.apache.hadoop.hdfs.qjournal.server.JournalNode" />
+       <Method name="getLogDir" />
+       <Bug pattern="NP_NULL_PARAM_DEREF" />
+     </Match>
+
+      <!-- guava 27.0 update: redundant nullcheck (assert for not null) -->
+      <Match>
+        <Class name="org.apache.hadoop.hdfs.qjournal.server.JournalNode" />
+        <Method name="getLogDir" />
+        <Bug pattern="RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE" />
+      </Match>
 
      <!-- Don't complain about LocalDatanodeInfo's anonymous class -->
      <Match>
@@ -252,4 +274,40 @@
         <Class name="org.apache.hadoop.hdfs.server.datanode.checker.AbstractFuture" />
         <Bug pattern="NS_DANGEROUS_NON_SHORT_CIRCUIT" />
     </Match>
- </FindBugsFilter>
+    <Match>
+        <Class name="org.apache.hadoop.hdfs.server.namenode.NNUpgradeUtil$1" />
+        <Method name="visitFile" />
+        <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE" />
+    </Match>
+    <Match>
+       <Class name="org.apache.hadoop.hdfs.server.namenode.NNUpgradeUtil$1" />
+       <Method name="visitFile" />
+       <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE" />
+     </Match>
+     <!-- Ignore warnings for not changing the startup option parsing behavior. -->
+     <Match>
+       <Class name="org.apache.hadoop.hdfs.server.common.HdfsServerConstants$StartupOption" />
+       <Method name="setClusterId" />
+       <Bug pattern="ME_ENUM_FIELD_SETTER" />
+     </Match>
+     <Match>
+       <Class name="org.apache.hadoop.hdfs.server.common.HdfsServerConstants$StartupOption" />
+       <Method name="setForce" />
+       <Bug pattern="ME_ENUM_FIELD_SETTER" />
+     </Match>
+     <Match>
+       <Class name="org.apache.hadoop.hdfs.server.common.HdfsServerConstants$StartupOption" />
+       <Method name="setForceFormat" />
+       <Bug pattern="ME_ENUM_FIELD_SETTER" />
+     </Match>
+     <Match>
+      <Class name="org.apache.hadoop.hdfs.server.common.HdfsServerConstants$StartupOption" />
+      <Method name="setInteractiveFormat" />
+      <Bug pattern="ME_ENUM_FIELD_SETTER" />
+    </Match>
+    <Match>
+      <Class name="org.apache.hadoop.hdfs.server.datanode.DirectoryScanner" />
+      <Method name="reconcile" />
+      <Bug pattern="SWL_SLEEP_WITH_LOCK_HELD" />
+    </Match>
+</FindBugsFilter>

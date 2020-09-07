@@ -27,12 +27,12 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentMap;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import org.apache.hadoop.metrics2.util.SampleStat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -48,7 +48,8 @@ import org.apache.hadoop.metrics2.util.SampleStat;
 @InterfaceAudience.Public
 @InterfaceStability.Evolving
 public class MutableRatesWithAggregation extends MutableMetric {
-  static final Log LOG = LogFactory.getLog(MutableRatesWithAggregation.class);
+  static final Logger LOG =
+      LoggerFactory.getLogger(MutableRatesWithAggregation.class);
   private final Map<String, MutableRate> globalMetrics =
       new ConcurrentHashMap<>();
   private final Set<Class<?>> protocolCache = Sets.newHashSet();
@@ -57,6 +58,8 @@ public class MutableRatesWithAggregation extends MutableMetric {
       weakReferenceQueue = new ConcurrentLinkedDeque<>();
   private final ThreadLocal<ConcurrentMap<String, ThreadSafeSampleStat>>
       threadLocalMetricsMap = new ThreadLocal<>();
+  // prefix for metric name
+  private String typePrefix = "";
 
   /**
    * Initialize the registry with all the methods in a protocol
@@ -72,6 +75,18 @@ public class MutableRatesWithAggregation extends MutableMetric {
     for (Method method : protocol.getDeclaredMethods()) {
       String name = method.getName();
       LOG.debug(name);
+      addMetricIfNotExists(name);
+    }
+  }
+
+  /**
+   * Initialize the registry with all rate names passed in.
+   * This is an alternative to the above init function since this metric
+   * can be used more than just for rpc name.
+   * @param names the array of all rate names
+   */
+  public void init(String[] names) {
+    for (String name : names) {
       addMetricIfNotExists(name);
     }
   }
@@ -147,7 +162,7 @@ public class MutableRatesWithAggregation extends MutableMetric {
   private synchronized MutableRate addMetricIfNotExists(String name) {
     MutableRate metric = globalMetrics.get(name);
     if (metric == null) {
-      metric = new MutableRate(name, name, false);
+      metric = new MutableRate(name + typePrefix, name + typePrefix, false);
       globalMetrics.put(name, metric);
     }
     return metric;
@@ -167,6 +182,11 @@ public class MutableRatesWithAggregation extends MutableMetric {
         stat.reset();
       }
     }
+  }
+
+  public void init(Class<?> protocol, String prefix) {
+    this.typePrefix = prefix;
+    init(protocol);
   }
 
 }

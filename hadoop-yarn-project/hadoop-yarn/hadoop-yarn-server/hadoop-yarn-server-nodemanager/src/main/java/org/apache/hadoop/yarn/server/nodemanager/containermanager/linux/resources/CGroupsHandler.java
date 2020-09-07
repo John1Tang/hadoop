@@ -23,6 +23,9 @@ package org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resourc
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 
+import java.util.HashSet;
+import java.util.Set;
+
 /**
  * Provides CGroups functionality. Implementations are expected to be
  * thread-safe
@@ -39,7 +42,11 @@ public interface CGroupsHandler {
     CPU("cpu"),
     NET_CLS("net_cls"),
     BLKIO("blkio"),
-    MEMORY("memory");
+    MEMORY("memory"),
+    CPUACCT("cpuacct"),
+    CPUSET("cpuset"),
+    FREEZER("freezer"),
+    DEVICES("devices");
 
     private final String name;
 
@@ -47,18 +54,36 @@ public interface CGroupsHandler {
       this.name = name;
     }
 
-    String getName() {
+    public String getName() {
       return name;
+    }
+
+    /**
+     * Get the list of valid cgroup names.
+     * @return The set of cgroup name strings
+     */
+    public static Set<String> getValidCGroups() {
+      HashSet<String> validCgroups = new HashSet<>();
+      for (CGroupController controller : CGroupController.values()) {
+        validCgroups.add(controller.getName());
+      }
+      return validCgroups;
     }
   }
 
-  String CGROUP_FILE_TASKS = "tasks";
+  String CGROUP_PROCS_FILE = "cgroup.procs";
   String CGROUP_PARAM_CLASSID = "classid";
   String CGROUP_PARAM_BLKIO_WEIGHT = "weight";
 
   String CGROUP_PARAM_MEMORY_HARD_LIMIT_BYTES = "limit_in_bytes";
+  String CGROUP_PARAM_MEMORY_SWAP_HARD_LIMIT_BYTES = "memsw.limit_in_bytes";
   String CGROUP_PARAM_MEMORY_SOFT_LIMIT_BYTES = "soft_limit_in_bytes";
+  String CGROUP_PARAM_MEMORY_OOM_CONTROL = "oom_control";
   String CGROUP_PARAM_MEMORY_SWAPPINESS = "swappiness";
+  String CGROUP_PARAM_MEMORY_USAGE_BYTES = "usage_in_bytes";
+  String CGROUP_PARAM_MEMORY_MEMSW_USAGE_BYTES = "memsw.usage_in_bytes";
+  String CGROUP_NO_LIMIT = "-1";
+  String UNDER_OOM = "under_oom 1";
 
 
   String CGROUP_CPU_PERIOD_US = "cfs_period_us";
@@ -92,6 +117,13 @@ public interface CGroupsHandler {
    */
   void deleteCGroup(CGroupController controller, String cGroupId) throws
       ResourceHandlerException;
+
+  /**
+   * Gets the absolute path to the specified cgroup controller.
+   * @param controller - controller type for the cgroup
+   * @return the root of the controller.
+   */
+  String getControllerPath(CGroupController controller);
 
   /**
    * Gets the relative path for the cgroup, independent of a controller, for a
@@ -154,4 +186,10 @@ public interface CGroupsHandler {
    */
   String getCGroupParam(CGroupController controller, String cGroupId,
       String param) throws ResourceHandlerException;
+
+  /**
+   * Returns CGroup Mount Path.
+   * @return parameter value as read from the parameter file
+   */
+  String getCGroupMountPath();
 }

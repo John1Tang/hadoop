@@ -28,9 +28,13 @@ import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.UpdateContainerError;
 import org.apache.hadoop.yarn.api.records.UpdateContainerRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.server.resourcemanager.MockAM;
 import org.apache.hadoop.yarn.server.resourcemanager.MockNM;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
+import org.apache.hadoop.yarn.server.resourcemanager.MockRMAppSubmissionData;
+import org.apache.hadoop.yarn.server.resourcemanager.MockRMAppSubmitter;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.NullRMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
@@ -80,7 +84,15 @@ public class TestIncreaseAllocationExpirer {
     rm1.start();
     // Submit an application
     MockNM nm1 = rm1.registerNode("127.0.0.1:1234", 20 * GB);
-    RMApp app1 = rm1.submitApp(1 * GB, "app", "user", null, "default");
+    MockRMAppSubmissionData data =
+        MockRMAppSubmissionData.Builder.createWithMemory(1 * GB, rm1)
+            .withAppName("app")
+            .withUser("user")
+            .withAcls(null)
+            .withQueue("default")
+            .withUnmanagedAM(false)
+            .build();
+    RMApp app1 = MockRMAppSubmitter.submit(rm1, data);
     MockAM am1 = MockRM.launchAndRegisterAM(app1, rm1, nm1);
     // Report AM container status RUNNING to remove it from expirer
     nm1.nodeHeartbeat(
@@ -130,7 +142,7 @@ public class TestIncreaseAllocationExpirer {
     Assert.assertEquals(RMContainerState.RUNNING,
         rm1.getResourceScheduler().getRMContainer(containerId2).getState());
     // Verify container size is 3G
-    Assert.assertEquals(
+      Assert.assertEquals(
         3 * GB, rm1.getResourceScheduler().getRMContainer(containerId2)
             .getAllocatedResource().getMemorySize());
     // Verify total resource usage
@@ -155,10 +167,24 @@ public class TestIncreaseAllocationExpirer {
      */
     // Set the allocation expiration to 5 seconds
     conf.setLong(YarnConfiguration.RM_CONTAINER_ALLOC_EXPIRY_INTERVAL_MS, 5000);
-    MockRM rm1 = new MockRM(conf);
+    final DrainDispatcher disp = new DrainDispatcher();
+    MockRM rm1 = new MockRM(conf) {
+      @Override
+      protected Dispatcher createDispatcher() {
+        return disp;
+      }
+    };
     rm1.start();
     MockNM nm1 = rm1.registerNode("127.0.0.1:1234", 20 * GB);
-    RMApp app1 = rm1.submitApp(1 * GB, "app", "user", null, "default");
+    MockRMAppSubmissionData data =
+        MockRMAppSubmissionData.Builder.createWithMemory(1 * GB, rm1)
+            .withAppName("app")
+            .withUser("user")
+            .withAcls(null)
+            .withQueue("default")
+            .withUnmanagedAM(false)
+            .build();
+    RMApp app1 = MockRMAppSubmitter.submit(rm1, data);
     MockAM am1 = MockRM.launchAndRegisterAM(app1, rm1, nm1);
     nm1.nodeHeartbeat(
         app1.getCurrentAppAttempt()
@@ -201,9 +227,11 @@ public class TestIncreaseAllocationExpirer {
     Thread.sleep(10000);
     // Verify container size is 1G
     am1.allocate(null, null);
+    rm1.drainEvents();
     Assert.assertEquals(
         1 * GB, rm1.getResourceScheduler().getRMContainer(containerId2)
             .getAllocatedResource().getMemorySize());
+    disp.waitForEventThreadToWait();
     // Verify total resource usage is 2G
     checkUsedResource(rm1, "default", 2 * GB, null);
     Assert.assertEquals(2 * GB,
@@ -233,7 +261,15 @@ public class TestIncreaseAllocationExpirer {
     rm1.start();
     // Submit an application
     MockNM nm1 = rm1.registerNode("127.0.0.1:1234", 20 * GB);
-    RMApp app1 = rm1.submitApp(1 * GB, "app", "user", null, "default");
+    MockRMAppSubmissionData data =
+        MockRMAppSubmissionData.Builder.createWithMemory(1 * GB, rm1)
+            .withAppName("app")
+            .withUser("user")
+            .withAcls(null)
+            .withQueue("default")
+            .withUnmanagedAM(false)
+            .build();
+    RMApp app1 = MockRMAppSubmitter.submit(rm1, data);
     MockAM am1 = MockRM.launchAndRegisterAM(app1, rm1, nm1);
     nm1.nodeHeartbeat(
         app1.getCurrentAppAttempt()
@@ -319,7 +355,7 @@ public class TestIncreaseAllocationExpirer {
     verifyAvailableResourceOfSchedulerNode(rm1, nm1.getNodeId(), 16 * GB);
     // Verify NM receives the decrease message (3G)
     List<Container> containersToDecrease =
-        nm1.nodeHeartbeat(true).getContainersToDecrease();
+        nm1.nodeHeartbeat(true).getContainersToUpdate();
     Assert.assertEquals(1, containersToDecrease.size());
     Assert.assertEquals(
         3 * GB, containersToDecrease.get(0).getResource().getMemorySize());
@@ -350,7 +386,15 @@ public class TestIncreaseAllocationExpirer {
     rm1.start();
     // Submit an application
     MockNM nm1 = rm1.registerNode("127.0.0.1:1234", 20 * GB);
-    RMApp app1 = rm1.submitApp(1 * GB, "app", "user", null, "default");
+    MockRMAppSubmissionData data =
+        MockRMAppSubmissionData.Builder.createWithMemory(1 * GB, rm1)
+            .withAppName("app")
+            .withUser("user")
+            .withAcls(null)
+            .withQueue("default")
+            .withUnmanagedAM(false)
+            .build();
+    RMApp app1 = MockRMAppSubmitter.submit(rm1, data);
     MockAM am1 = MockRM.launchAndRegisterAM(app1, rm1, nm1);
     nm1.nodeHeartbeat(
         app1.getCurrentAppAttempt()
@@ -420,10 +464,11 @@ public class TestIncreaseAllocationExpirer {
     nm1.containerIncreaseStatus(getContainer(
         rm1, containerId4, Resources.createResource(6 * GB)));
     // Wait for containerId3 token to expire,
-    Thread.sleep(10000);
+    Thread.sleep(12000);
 
     am1.allocate(null, null);
 
+    rm1.drainEvents();
     Assert.assertEquals(
         2 * GB, rm1.getResourceScheduler().getRMContainer(containerId2)
             .getAllocatedResource().getMemorySize());
@@ -435,14 +480,22 @@ public class TestIncreaseAllocationExpirer {
             .getAllocatedResource().getMemorySize());
     // Verify NM receives 2 decrease message
     List<Container> containersToDecrease =
-        nm1.nodeHeartbeat(true).getContainersToDecrease();
-    Assert.assertEquals(2, containersToDecrease.size());
+        nm1.nodeHeartbeat(true).getContainersToUpdate();
+    // NOTE: Can be more that 2 depending on which event arrives first.
+    // What is important is the final size of the containers.
+    Assert.assertTrue(containersToDecrease.size() >= 2);
+
     // Sort the list to make sure containerId3 is the first
     Collections.sort(containersToDecrease);
+    int i = 0;
+    if (containersToDecrease.size() > 2) {
+      Assert.assertEquals(
+          2 * GB, containersToDecrease.get(i++).getResource().getMemorySize());
+    }
     Assert.assertEquals(
-        3 * GB, containersToDecrease.get(0).getResource().getMemorySize());
+        3 * GB, containersToDecrease.get(i++).getResource().getMemorySize());
     Assert.assertEquals(
-        4 * GB, containersToDecrease.get(1).getResource().getMemorySize());
+        4 * GB, containersToDecrease.get(i++).getResource().getMemorySize());
     rm1.stop();
   }
 

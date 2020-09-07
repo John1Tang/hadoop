@@ -20,6 +20,9 @@ package org.apache.hadoop.crypto.key.kms.server;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.log4j.PropertyConfigurator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.net.MalformedURLException;
@@ -30,6 +33,8 @@ import java.net.URL;
  */
 @InterfaceAudience.Private
 public class KMSConfiguration {
+
+  static final Logger LOG = LoggerFactory.getLogger(KMSConfiguration.class);
 
   public static final String KMS_CONFIG_DIR = "kms.config.dir";
   public static final String KMS_DEFAULT_XML = "kms-default.xml";
@@ -72,6 +77,15 @@ public class KMSConfiguration {
   public static final String KMS_AUDIT_AGGREGATION_WINDOW = CONFIG_PREFIX +
       "audit.aggregation.window.ms";
 
+  // Process name shown in metrics
+  public static final String METRICS_PROCESS_NAME_KEY =
+      CONFIG_PREFIX + "metrics.process.name";
+  public static final String METRICS_PROCESS_NAME_DEFAULT = "KMS";
+
+  // Session id for metrics
+  public static final String METRICS_SESSION_ID_KEY =
+      CONFIG_PREFIX + "metrics.session.id";
+
   // KMS Audit logger classes to use
   public static final String KMS_AUDIT_LOGGER_KEY = CONFIG_PREFIX +
       "audit.logger";
@@ -89,6 +103,8 @@ public class KMSConfiguration {
       "key.authorization.enable"; 
 
   public static final boolean KEY_AUTHORIZATION_ENABLE_DEFAULT = true;
+
+  private static final String LOG4J_PROPERTIES = "kms-log4j.properties";
 
   static {
     Configuration.addDefaultResource(KMS_DEFAULT_XML);
@@ -138,10 +154,40 @@ public class KMSConfiguration {
             "' must be an absolute path: " + confDir);
       }
       File f = new File(confDir, KMS_ACLS_XML);
+      LOG.trace("Checking file {}, modification time is {}, last reload time is"
+          + " {}", f.getPath(), f.lastModified(), time);
       // at least 100ms newer than time, we do this to ensure the file
       // has been properly closed/flushed
       newer = f.lastModified() - time > 100;
     }
     return newer;
+  }
+
+  public static void initLogging() {
+    String confDir = System.getProperty(KMS_CONFIG_DIR);
+    if (confDir == null) {
+      throw new RuntimeException("System property '" +
+          KMSConfiguration.KMS_CONFIG_DIR + "' not defined");
+    }
+    if (System.getProperty("log4j.configuration") == null) {
+      System.setProperty("log4j.defaultInitOverride", "true");
+      boolean fromClasspath = true;
+      File log4jConf = new File(confDir, LOG4J_PROPERTIES).getAbsoluteFile();
+      if (log4jConf.exists()) {
+        PropertyConfigurator.configureAndWatch(log4jConf.getPath(), 1000);
+        fromClasspath = false;
+      } else {
+        ClassLoader cl = Thread.currentThread().getContextClassLoader();
+        URL log4jUrl = cl.getResource(LOG4J_PROPERTIES);
+        if (log4jUrl != null) {
+          PropertyConfigurator.configure(log4jUrl);
+        }
+      }
+      LOG.debug("KMS log starting");
+      if (fromClasspath) {
+        LOG.warn("Log4j configuration file '{}' not found", LOG4J_PROPERTIES);
+        LOG.warn("Logging with INFO level to standard output");
+      }
+    }
   }
 }

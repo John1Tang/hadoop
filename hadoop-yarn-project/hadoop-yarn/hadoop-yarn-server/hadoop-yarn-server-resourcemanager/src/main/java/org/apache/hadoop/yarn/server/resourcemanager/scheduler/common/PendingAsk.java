@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.common;
 
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceSizing;
 import org.apache.hadoop.yarn.util.resource.Resources;
 
 /**
@@ -30,6 +31,11 @@ public class PendingAsk {
   private final Resource perAllocationResource;
   private final int count;
   public final static PendingAsk ZERO = new PendingAsk(Resources.none(), 0);
+
+  public PendingAsk(ResourceSizing sizing) {
+    this.perAllocationResource = sizing.getResources();
+    this.count = sizing.getNumAllocations();
+  }
 
   public PendingAsk(Resource res, int num) {
     this.perAllocationResource = res;
@@ -47,11 +53,11 @@ public class PendingAsk {
   @Override
   public String toString() {
     StringBuilder sb = new StringBuilder();
-    sb.append("<per-allocation-resource=");
-    sb.append(getPerAllocationResource());
-    sb.append(",repeat=");
-    sb.append(getCount());
-    sb.append(">");
+    sb.append("<per-allocation-resource=")
+        .append(getPerAllocationResource())
+        .append(",repeat=")
+        .append(getCount())
+        .append(">");
     return sb.toString();
   }
 }

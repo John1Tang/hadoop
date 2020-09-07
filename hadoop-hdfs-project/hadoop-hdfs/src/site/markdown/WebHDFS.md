@@ -39,6 +39,7 @@ The HTTP REST API supports the complete [FileSystem](../../api/org/apache/hadoop
     * [`LISTSTATUS`](#List_a_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listStatus)
     * [`LISTSTATUS_BATCH`](#Iteratively_List_a_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listStatusIterator)
     * [`GETCONTENTSUMMARY`](#Get_Content_Summary_of_a_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getContentSummary)
+    * [`GETQUOTAUSAGE`](#Get_Quota_Usage_of_a_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getQuotaUsage)
     * [`GETFILECHECKSUM`](#Get_File_Checksum) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileChecksum)
     * [`GETHOMEDIRECTORY`](#Get_Home_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getHomeDirectory)
     * [`GETDELEGATIONTOKEN`](#Get_Delegation_Token) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getDelegationToken)
@@ -50,7 +51,10 @@ The HTTP REST API supports the complete [FileSystem](../../api/org/apache/hadoop
     * [`CHECKACCESS`](#Check_access) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).access)
     * [`GETALLSTORAGEPOLICY`](#Get_all_Storage_Policies) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getAllStoragePolicies)
     * [`GETSTORAGEPOLICY`](#Get_Storage_Policy) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getStoragePolicy)
+    * [`GETSNAPSHOTDIFF`](#Get_Snapshot_Diff)
+    * [`GETSNAPSHOTTABLEDIRECTORYLIST`](#Get_Snapshottable_Directory_List)
     * [`GETFILEBLOCKLOCATIONS`](#Get_File_Block_Locations) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileBlockLocations)
+    * [`GETECPOLICY`](#Get_EC_Policy) (see [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).getErasureCodingPolicy)
 *   HTTP PUT
     * [`CREATE`](#Create_and_Write_to_a_File) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).create)
     * [`MKDIRS`](#Make_a_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).mkdirs)
@@ -62,16 +66,23 @@ The HTTP REST API supports the complete [FileSystem](../../api/org/apache/hadoop
     * [`SETTIMES`](#Set_Access_or_Modification_Time) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).setTimes)
     * [`RENEWDELEGATIONTOKEN`](#Renew_Delegation_Token) (see [DelegationTokenAuthenticator](../../api/org/apache/hadoop/security/token/delegation/web/DelegationTokenAuthenticator.html).renewDelegationToken)
     * [`CANCELDELEGATIONTOKEN`](#Cancel_Delegation_Token) (see [DelegationTokenAuthenticator](../../api/org/apache/hadoop/security/token/delegation/web/DelegationTokenAuthenticator.html).cancelDelegationToken)
+    * [`ALLOWSNAPSHOT`](#Allow_Snapshot)
+    * [`DISALLOWSNAPSHOT`](#Disallow_Snapshot)
     * [`CREATESNAPSHOT`](#Create_Snapshot) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).createSnapshot)
     * [`RENAMESNAPSHOT`](#Rename_Snapshot) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).renameSnapshot)
     * [`SETXATTR`](#Set_XAttr) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).setXAttr)
     * [`REMOVEXATTR`](#Remove_XAttr) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).removeXAttr)
     * [`SETSTORAGEPOLICY`](#Set_Storage_Policy) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).setStoragePolicy)
+    * [`SATISFYSTORAGEPOLICY`](#Satisfy_Storage_Policy) (see [ArchivalStorage](./ArchivalStorage.html#Satisfy_Storage_Policy).satisfyStoragePolicy)
+    * [`ENABLEECPOLICY`](#Enable_EC_Policy) (see [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).enablePolicy)
+    * [`DISABLEECPOLICY`](#Disable_EC_Policy) (see [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).disablePolicy)
+    * [`SETECPOLICY`](#Set_EC_Policy) (see [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).setErasureCodingPolicy)
 *   HTTP POST
     * [`APPEND`](#Append_to_a_File) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).append)
     * [`CONCAT`](#Concat_Files) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).concat)
     * [`TRUNCATE`](#Truncate_a_File) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).truncate)
     * [`UNSETSTORAGEPOLICY`](#Unset_Storage_Policy) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).unsetStoragePolicy)
+    * [`UNSETECPOLICY`](#Unset_EC_Policy) (see [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).unsetErasureCodingPolicy)
 *   HTTP DELETE
     * [`DELETE`](#Delete_a_FileDirectory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).delete)
     * [`DELETESNAPSHOT`](#Delete_Snapshot) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).deleteSnapshot)
@@ -94,6 +105,7 @@ In the REST API, the prefix "`/webhdfs/v1`" is inserted in the path and a query 
 
       swebhdfs://<HOST>:<HTTP_PORT>/<PATH>
 
+See also: [SSL Configurations for SWebHDFS](#SSL_Configurations_for_SWebHDFS)
 
 ### HDFS Configuration Options
 
@@ -154,6 +166,56 @@ The following properties control OAuth2 authentication.
 | `dfs.webhdfs.oauth2.refresh.token.expires.ms.since.epoch` | (required if using ConfRefreshTokenBasedAccessTokenProvider) Access token expiration measured in milliseconds since Jan 1, 1970.  *Note this is a different value than provided by OAuth providers and has been munged as described in interface to be suitable for a client application*  |
 | `dfs.webhdfs.oauth2.credential` | (required if using ConfCredentialBasedAccessTokenProvider).  Credential used to obtain initial and subsequent access tokens. |
 
+SSL Configurations for SWebHDFS
+-------------------------------------------------------
+
+To use SWebHDFS FileSystem (i.e. using the swebhdfs protocol), a SSL configuration
+file needs to be specified on the client side. This must specify 3 parameters:
+
+| SSL property | Description |
+|:---- |:---- |
+| `ssl.client.truststore.location` | The local-filesystem location of the trust-store file, containing the certificate for the NameNode. |
+| `ssl.client.truststore.type` | (Optional) The format of the trust-store file. |
+| `ssl.client.truststore.password` | (Optional) Password for the trust-store file. |
+
+The following is an example SSL configuration file (**ssl-client.xml**):
+
+```xml
+<configuration>
+  <property>
+    <name>ssl.client.truststore.location</name>
+    <value>/work/keystore.jks</value>
+    <description>Truststore to be used by clients. Must be specified.</description>
+  </property>
+
+  <property>
+    <name>ssl.client.truststore.password</name>
+    <value>changeme</value>
+    <description>Optional. Default value is "".</description>
+  </property>
+
+  <property>
+    <name>ssl.client.truststore.type</name>
+    <value>jks</value>
+    <description>Optional. Default value is "jks".</description>
+  </property>
+</configuration>
+```
+
+The SSL configuration file must be in the class-path of the client program and the filename needs to be specified in **core-site.xml**:
+
+```xml
+<property>
+  <name>hadoop.ssl.client.conf</name>
+  <value>ssl-client.xml</value>
+  <description>
+    Resource file from which ssl client keystore information will be extracted.
+    This file is looked up in the classpath, typically it should be in Hadoop
+    conf/ directory. Default value is "ssl-client.xml".
+  </description>
+</property>
+```
+
 Proxy Users
 -----------
 
@@ -200,6 +262,7 @@ The following properties control CSRF prevention.
 | `dfs.webhdfs.rest-csrf.custom-header` | The name of a custom header that HTTP requests must send when protection against cross-site request forgery (CSRF) is enabled for WebHDFS by setting dfs.webhdfs.rest-csrf.enabled to true.  The WebHDFS client also uses this property to determine whether or not it needs to send the custom CSRF prevention header in its HTTP requests. | `X-XSRF-HEADER` |
 | `dfs.webhdfs.rest-csrf.methods-to-ignore` | A comma-separated list of HTTP methods that do not require HTTP requests to include a custom header when protection against cross-site request forgery (CSRF) is enabled for WebHDFS by setting dfs.webhdfs.rest-csrf.enabled to true.  The WebHDFS client also uses this property to determine whether or not it needs to send the custom CSRF prevention header in its HTTP requests. | `GET,OPTIONS,HEAD,TRACE` |
 | `dfs.webhdfs.rest-csrf.browser-useragents-regex` | A comma-separated list of regular expressions used to match against an HTTP request's User-Agent header when protection against cross-site request forgery (CSRF) is enabled for WebHDFS by setting dfs.webhdfs.reset-csrf.enabled to true.  If the incoming User-Agent matches any of these regular expressions, then the request is considered to be sent by a browser, and therefore CSRF prevention is enforced.  If the request's User-Agent does not match any of these regular expressions, then the request is considered to be sent by something other than a browser, such as scripted automation.  In this case, CSRF is not a potential attack vector, so the prevention is not enforced.  This helps achieve backwards-compatibility with existing automation that has not been updated to send the CSRF prevention header. | `^Mozilla.*,^Opera.*` |
+| `dfs.datanode.httpserver.filter.handlers` | Comma separated list of Netty servlet-style filter handlers to inject into the Datanode WebHDFS I/O path | `org.apache.hadoop.hdfs.server.datanode.web.RestCsrfPreventionFilterHandler` |
 
 The following is an example `curl` call that uses the `-H` option to include the
 custom header in the request.
@@ -222,6 +285,15 @@ The following properties control WebHDFS retry and failover policy.
 | `dfs.http.client.retry.max.attempts` | Specify the max number of retry attempts for WebHDFS client, if the difference between retried attempts and failovered attempts is larger than the max number of retry attempts, there will be no more retries. | `10` |
 | `dfs.http.client.failover.sleep.base.millis` | Specify the base amount of time in milliseconds upon which the exponentially increased sleep time between retries or failovers is calculated for WebHDFS client. | `500` |
 | `dfs.http.client.failover.sleep.max.millis` | Specify the upper bound of sleep time in milliseconds between retries or failovers for WebHDFS client. | `15000` |
+
+WebHDFS Request Filtering
+-------------------------------------
+One may control directionality of data in the WebHDFS protocol allowing only writing data from insecure networks. To enable, one must ensure `dfs.datanode.httpserver.filter.handlers` includes `org.apache.hadoop.hdfs.server.datanode.web.HostRestrictingAuthorizationFilterHandler`.  Configuration of the `HostRestrictingAuthorizationFilter` is controlled via the following properties.
+
+| Property | Description | Default Value |
+|:---- |:---- |:----
+| `dfs.datanode.httpserver.filter.handlers` | Comma separated list of Netty servlet-style filter handlers to inject into the Datanode WebHDFS I/O path | `org.apache.hadoop.hdfs.server.datanode.web.RestCsrfPreventionFilterHandler` |
+| `dfs.web.authentication.host.allow.rules` | Rules allowing users to read files in the format of _user_,_network/bits_,_path glob_ newline or `|`-separated. Use `*` for a wildcard of all _users_ or _network/bits_. | nothing - defaults to no one may read via WebHDFS |
 
 File and Directory Operations
 -----------------------------
@@ -441,6 +513,7 @@ See also: [`newlength`](#New_Length), [FileSystem](../../api/org/apache/hadoop/f
             "pathSuffix"      : "",
             "permission"      : "777",
             "replication"     : 0,
+            "snapshotEnabled" : true
             "type"            : "DIRECTORY"    //enum {FILE, DIRECTORY, SYMLINK}
           }
         }
@@ -467,6 +540,8 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileSt
               {
                 "accessTime"      : 1320171722771,
                 "blockSize"       : 33554432,
+                "childrenNum"     : 0,
+                "fileId"          : 16388,
                 "group"           : "supergroup",
                 "length"          : 24930,
                 "modificationTime": 1320171722771,
@@ -474,11 +549,14 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileSt
                 "pathSuffix"      : "a.patch",
                 "permission"      : "644",
                 "replication"     : 1,
+                "storagePolicy"   : 0,
                 "type"            : "FILE"
               },
               {
                 "accessTime"      : 0,
                 "blockSize"       : 0,
+                "childrenNum"     : 0,
+                "fileId"          : 16389,
                 "group"           : "supergroup",
                 "length"          : 0,
                 "modificationTime": 1320895981256,
@@ -486,6 +564,7 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileSt
                 "pathSuffix"      : "bar",
                 "permission"      : "711",
                 "replication"     : 0,
+                "snapshotEnabled" : true
                 "type"            : "DIRECTORY"
               },
               ...
@@ -494,6 +573,45 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileSt
         }
 
 See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listStatus
+
+### List a File
+
+* Submit a HTTP GET request.
+
+        curl -i  "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=LISTSTATUS"
+
+    The client receives a response with a [`FileStatuses` JSON object](#FileStatuses_JSON_Schema):
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Content-Length: 427
+
+        {
+          "FileStatuses":
+          {
+            "FileStatus":
+            [
+              {
+                "accessTime"      : 1320171722771,
+                "blockSize"       : 33554432,
+                "childrenNum"     : 0,
+                "fileId"          : 16390,
+                "group"           : "supergroup",
+                "length"          : 1366,
+                "modificationTime": 1501770633062,
+                "owner"           : "webuser",
+                "pathSuffix"      : "",
+                "permission"      : "644",
+                "replication"     : 1,
+                "storagePolicy"   : 0,
+                "type"            : "FILE"
+              }
+            ]
+          }
+        }
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listStatus
+
 
 ### Iteratively List a Directory
 
@@ -643,6 +761,7 @@ Other File System Operations
           "ContentSummary":
           {
             "directoryCount": 2,
+            "ecPolicy"      : "RS-6-3-1024k",
             "fileCount"     : 1,
             "length"        : 24930,
             "quota"         : -1,
@@ -670,6 +789,76 @@ Other File System Operations
         }
 
 See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getContentSummary
+
+### Get Quota Usage of a Directory
+
+* Submit a HTTP GET request.
+
+        curl -i "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=GETQUOTAUSAGE"
+
+    The client receives a response with a [`QuotaUsage` JSON object](#QuotaUsage_JSON_Schema):
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Transfer-Encoding: chunked
+
+        {
+          "QuotaUsage":
+          {
+            "fileAndDirectoryCount": 1,
+            "quota"         : 100,
+            "spaceConsumed" : 24930,
+            "spaceQuota"    : 100000,
+            "typeQuota":
+            {
+              "ARCHIVE":
+              {
+                "consumed": 500,
+                "quota": 10000
+              },
+              "DISK":
+              {
+                "consumed": 500,
+                "quota": 10000
+              },
+              "SSD":
+              {
+                "consumed": 500,
+                "quota": 10000
+              }
+            }
+          }
+        }
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getQuotaUsage
+
+### Set Quota
+
+* Submit a HTTP PUT request.
+
+        curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=SETQUOTA
+                                      &namespacequota=<QUOTA>[&storagespacequota=<QUOTA>]"
+
+    The client receives a response with zero content length:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).setQuota
+
+### Set Quota By Storage Type
+
+* Submit a HTTP PUT request.
+
+        curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=SETQUOTABYSTORAGETYPE
+                                      &storagetype=<STORAGETYPE>&storagespacequota=<QUOTA>"
+
+    The client receives a response with zero content length:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).setQuotaByStorageType
 
 ### Get File Checksum
 
@@ -1030,7 +1219,7 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).unsetStor
         {
             "BlockStoragePolicy": {
                 "copyOnCreateFile": false,
-                "creationFallbacks": [],
+               "creationFallbacks": [],
                 "id":7,
                 "name":"HOT",
                 "replicationFallbacks":["ARCHIVE"],
@@ -1039,6 +1228,19 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).unsetStor
         }
 
 See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getStoragePolicy
+
+### Satisfy Storage Policy
+
+* Submit a HTTP PUT request.
+
+        curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=SATISFYSTORAGEPOLICY"
+
+    The client receives a response with zero content length:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+See also: [ArchivalStorage](./ArchivalStorage.html#Satisfy_Storage_Policy).satisfyStoragePolicy
 
 ### Get File Block Locations
 
@@ -1064,7 +1266,6 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getStorag
                 "length" : 134217728,                             // length of this block
                 "names" : ["host:ip"],
                 "offset" : 0,                                     // offset of the block in the file
-                "storageIds" : ["storageid"],
                 "storageTypes" : ["DISK"],                        // enum {RAM_DISK, SSD, DISK, ARCHIVE}
                 "topologyPaths" : ["/default-rack/hostname:ip"]
               }, {
@@ -1074,7 +1275,6 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getStorag
                 "length" : 62599364,
                 "names" : ["host:ip"],
                 "offset" : 134217728,
-                "storageIds" : ["storageid"],
                 "storageTypes" : ["DISK"],
                 "topologyPaths" : ["/default-rack/hostname:ip"]
               },
@@ -1220,8 +1420,122 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getXAttrs
 
 See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listXAttrs
 
+Erasure Coding Operations
+-------------------------
+
+### Enable EC Policy
+
+* Submit a HTTP PUT request.
+
+        curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/?op=ENABLEECPOLICY
+                                      &ecpolicy=<policy>"
+
+    The client receives a response with zero content length:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+See also: [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).enablePolicy
+
+### Disable EC Policy
+
+* Submit a HTTP PUT request.
+
+        curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/?op=DISABLEECPOLICY
+                                      &ecpolicy=<policy>"
+
+    The client receives a response with zero content length:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+See also: [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).disablePolicy
+
+### Set EC Policy
+
+* Submit a HTTP PUT request.
+
+        curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=SETECPOLICY
+                                      &ecpolicy=<policy>"
+
+    The client receives a response with zero content length:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+See also: [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).setErasureCodingPolicy
+
+### Get EC Policy
+
+* Submit a HTTP GET request.
+
+        curl -i -X GET "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=GETECPOLICY
+                                     "
+
+   The client receives a response with a [`ECPolicy` JSON object](#ECPolicy_JSON_Schema):
+
+
+        {
+            "name": "RS-10-4-1024k",
+            "schema":
+            {
+            "codecName": "rs",
+            "numDataUnits": 10,
+            "numParityUnits": 4,
+            "extraOptions": {}
+            }
+            "cellSize": 1048576,
+            "id":5,
+            "codecname":"rs",
+            "numDataUnits": 10,
+            "numParityUnits": 4,
+            "replicationpolicy":false,
+            "systemPolicy":true
+
+        }
+
+
+
+See also: [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).getErasureCodingPolicy
+
+### Unset EC Policy
+
+* Submit a HTTP POST request.
+
+        curl -i -X POST "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=UNSETECPOLICY
+                                     "
+
+    The client receives a response with zero content length:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+See also: [HDFSErasureCoding](./HDFSErasureCoding.html#Administrative_commands).unsetErasureCodingPolicy
+
 Snapshot Operations
 -------------------
+
+### Allow Snapshot
+
+* Submit a HTTP PUT request.
+
+        curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=ALLOWSNAPSHOT"
+
+    The client receives a response with zero content length on success:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+### Disallow Snapshot
+
+* Submit a HTTP PUT request.
+
+        curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=DISALLOWSNAPSHOT"
+
+    The client receives a response with zero content length on success:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
 
 ### Create Snapshot
 
@@ -1265,6 +1579,60 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).deleteSna
         Content-Length: 0
 
 See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).renameSnapshot
+
+### Get Snapshot Diff
+
+* Submit a HTTP GET request.
+
+        curl -i GET "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=GETSNAPSHOTDIFF
+                           &oldsnapshotname=<SNAPSHOTNAME>&snapshotname=<SNAPSHOTNAME>"
+
+    The client receives a response with a [`SnapshotDiffReport` JSON object](#SnapshotDiffReport_JSON_Schema):
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Transfer-Encoding: chunked
+
+        {"SnapshotDiffReport":{"diffList":[],"fromSnapshot":"s3","snapshotRoot":"/foo","toSnapshot":"s4"}}
+
+### Get Snapshottable Directory List
+
+* Submit a HTTP GET request.
+
+        curl -i GET "http://<HOST>:<PORT>/webhdfs/v1/?user.name=<USER>&op=GETSNAPSHOTTABLEDIRECTORYLIST"
+
+    If the USER is not the hdfs super user, the call lists only the snapshottable directories owned by the user. If the USER is the hdfs super user, the call lists all the snapshottable directories. The client receives a response with a [`SnapshottableDirectoryList` JSON object](#SnapshottableDirectoryList_JSON_Schema):
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Transfer-Encoding: chunked
+
+        {
+            "SnapshottableDirectoryList":
+            [
+                {
+                  "dirStatus":
+                    {
+                        "accessTime":0,
+                        "blockSize":0,
+                        "childrenNum":0,
+                        "fileId":16386,
+                        "group":"hadoop",
+                        "length":0,
+                        "modificationTime":1520761889225,
+                        "owner":"random",
+                        "pathSuffix":"bar",
+                        "permission":"755",
+                        "replication":0,
+                        "storagePolicy":0,
+                        "type":"DIRECTORY"
+                    },
+                  "parentFullPath":"/",
+                  "snapshotNumber":0,
+                  "snapshotQuota":65536
+                }
+            ]
+        }
 
 Delegation Token Operations
 ---------------------------
@@ -1638,6 +2006,114 @@ See also: [`MKDIRS`](#Make_a_Directory), [`RENAME`](#Rename_a_FileDirectory), [`
 ```
 
 See also: [`GETCONTENTSUMMARY`](#Get_Content_Summary_of_a_Directory)
+
+### QuotaUsage JSON Schema
+
+```json
+{
+  "name"      : "QuotaUsage",
+  "properties":
+  {
+    "QuotaUsage":
+    {
+      "type"      : "object",
+      "properties":
+      {
+        "fileAndDirectoryCount":
+        {
+          "description": "The number of files and directories.",
+          "type"       : "integer",
+          "required"   : true
+        },
+        "quota":
+        {
+          "description": "The namespace quota of this directory.",
+          "type"       : "integer",
+          "required"   : true
+        },
+        "spaceConsumed":
+        {
+          "description": "The disk space consumed by the content.",
+          "type"       : "integer",
+          "required"   : true
+        },
+        "spaceQuota":
+        {
+          "description": "The disk space quota.",
+          "type"       : "integer",
+          "required"   : true
+        },
+        "typeQuota":
+        {
+          "type"      : "object",
+          "properties":
+          {
+            "ARCHIVE":
+            {
+              "type"      : "object",
+              "properties":
+              {
+                "consumed":
+                {
+                  "description": "The storage type space consumed.",
+                  "type"       : "integer",
+                  "required"   : true
+                },
+                "quota":
+                {
+                  "description": "The storage type quota.",
+                  "type"       : "integer",
+                  "required"   : true
+                }
+              }
+            },
+            "DISK":
+            {
+              "type"      : "object",
+              "properties":
+              {
+                "consumed":
+                {
+                  "description": "The storage type space consumed.",
+                  "type"       : "integer",
+                  "required"   : true
+                },
+                "quota":
+                {
+                  "description": "The storage type quota.",
+                  "type"       : "integer",
+                  "required"   : true
+                }
+              }
+            },
+            "SSD":
+            {
+              "type"      : "object",
+              "properties":
+              {
+                "consumed":
+                {
+                  "description": "The storage type space consumed.",
+                  "type"       : "integer",
+                  "required"   : true
+                },
+                "quota":
+                {
+                  "description": "The storage type quota.",
+                  "type"       : "integer",
+                  "required"   : true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+See also: [`GETQUOTAUSAGE`](#Get_Quota_Usage_of_a_Directory)
 
 ### FileChecksum JSON Schema
 
@@ -2016,6 +2492,26 @@ var blockStoragePolicyProperties =
   }
 };
 ```
+### ECPolicy JSON Schema
+
+```json
+{
+  "name": "RS-10-4-1024k",
+  schema {
+           "codecName": "rs",
+           "numDataUnits": 10,
+           "numParityUnits": 4,
+           "extraOptions": {}
+          }
+  "cellSize": 1048576,
+  "id":5,
+  "codecname":"rs",
+  "numDataUnits": 10,
+  "numParityUnits": 4,
+  "replicationpolicy":false,
+  "systemPolicy":true
+}
+```
 
 ### BlockStoragePolicies JSON Schema
 
@@ -2043,7 +2539,136 @@ A `BlockStoragePolicies` JSON object represents an array of `BlockStoragePolicy`
 }
 ```
 
-#### BlockLocations JSON Schema
+### SnapshotDiffReport JSON Schema
+
+```json
+{
+  "name": "SnapshotDiffReport",
+  "type": "object",
+  "properties":
+  {
+    "SnapshotDiffReport":
+    {
+      "type"        : "object",
+      "properties"  :
+      {
+        "diffList":
+        {
+          "description": "An array of DiffReportEntry",
+          "type"        : "array",
+          "items"       : diffReportEntries,
+          "required"    : true
+        },
+        "fromSnapshot":
+        {
+          "description": "Source snapshot",
+          "type"        : "string",
+          "required"    : true
+        },
+        "snapshotRoot":
+        {
+          "description" : "String representation of snapshot root path",
+          "type"        : "string",
+          "required"    : true
+        },
+        "toSnapshot":
+        {
+          "description" : "Destination snapshot",
+          "type"        : "string",
+          "required"    : true
+        }
+      }
+    }
+  }
+}
+```
+
+
+#### DiffReport Entries
+
+JavaScript syntax is used to define `diffReportEntries` so that it can be referred in `SnapshotDiffReport` JSON schema.
+
+```javascript
+var diffReportEntries =
+{
+  "type": "object",
+  "properties":
+  {
+    "sourcePath":
+    {
+      "description" : "Source path name relative to snapshot root",
+      "type"        : "string",
+      "required"    : true
+    },
+    "targetPath":
+    {
+      "description" : "Target path relative to snapshot root used for renames",
+      "type"        : "string",
+      "required"    : true
+    },
+    "type":
+    {
+      "description" : "Type of diff report entry",
+      "enum"        : ["CREATE", "MODIFY", "DELETE", "RENAME"],
+      "required"    : true
+    }
+  }
+}
+```
+
+### SnapshottableDirectoryList JSON Schema
+
+```json
+{
+  "name": "SnapshottableDirectoryList",
+  "type": "object",
+  "properties":
+  {
+    "SnapshottableDirectoryList":
+    {
+      "description": "An array of SnapshottableDirectoryStatus",
+      "type"        : "array",
+      "items"       : snapshottableDirectoryStatus,
+      "required"    : true
+    }
+  }
+}
+```
+
+#### SnapshottableDirectoryStatus
+
+JavaScript syntax is used to define `snapshottableDirectoryStatus` so that it can be referred in `SnapshottableDirectoryList` JSON schema.
+
+```javascript
+var snapshottableDirectoryStatus =
+{
+  "type": "object",
+  "properties":
+  {
+    "dirStatus": fileStatusProperties,
+    "parentFullPath":
+    {
+      "description" : "Full path of the parent of snapshottable directory",
+      "type"        : "string",
+      "required"    : true
+    },
+    "snapshotNumber":
+    {
+      "description" : "Number of snapshots created on the snapshottable directory",
+      "type"        : "integer",
+      "required"    : true
+    },
+    "snapshotQuota":
+    {
+      "description" : "Total number of snapshots allowed on the snapshottable directory",
+      "type"        : "integer",
+      "required"    : true
+    }
+  }
+}
+```
+
+### BlockLocations JSON Schema
 
 A `BlockLocations` JSON object represents an array of `BlockLocation` JSON objects.
 
@@ -2145,17 +2770,6 @@ var blockLocationProperties =
       "description": "Offset of the block in the file",
       "type"       : "integer",
       "required"   : "true"
-    },
-    "storageIds":
-    {
-      "description": "Storage ID of each replica",
-      "type"       : "array",
-      "required"   : "true",
-      "items"      :
-      {
-        "description": "Storage ID",
-        "type"       : "string"
-      }
     },
     "storageTypes":
     {
@@ -2593,6 +3207,42 @@ See also: [Authentication](#Authentication)
 
 See also: [Create and Write to a File](#Create_and_Write_to_a_File)
 
+### Namespace Quota
+
+| Name | `namespacequota` |
+|:---- |:---- |
+| Description | Limit on the namespace usage, i.e., number of files/directories, under a directory. |
+| Type | String |
+| Default Value | Long.MAX_VALUE |
+| Valid Values | \> 0. |
+| Syntax | Any integer. |
+
+See also: [`SETQUOTA`](#Set_Quota)
+
+### Storage Space Quota
+
+| Name | `storagespacequota` |
+|:---- |:---- |
+| Description | Limit on storage space usage (in bytes, including replication) under a directory. |
+| Type | String |
+| Default Value | Long.MAX_VALUE |
+| Valid Values | \> 0. |
+| Syntax | Any integer. |
+
+See also: [`SETQUOTA`](#Set_Quota), [`SETQUOTABYSTORAGETYPE`](#Set_Quota_By_Storage_Type)
+
+### Storage Type
+
+| Name | `storagetype` |
+|:---- |:---- |
+| Description | Storage type of the specific storage type quota to be modified. |
+| Type | String |
+| Default Value | \<empty\> |
+| Valid Values | Any valid storage type. |
+| Syntax | Any string. |
+
+See also: [`SETQUOTABYSTORAGETYPE`](#Set_Quota_By_Storage_Type)
+
 ### Storage Policy
 
 | Name | `storagepolicy` |
@@ -2604,6 +3254,18 @@ See also: [Create and Write to a File](#Create_and_Write_to_a_File)
 | Syntax | Any string. |
 
 See also: [`SETSTORAGEPOLICY`](#Set_Storage_Policy)
+
+### Erasure Coding Policy
+
+| Name | `ecpolicy` |
+|:---- |:---- |
+| Description | The name of the erasure coding policy. |
+| Type | String |
+| Default Value | \<empty\> |
+| Valid Values | Any valid erasure coding policy name;  |
+| Syntax | Any string. |
+
+See also: [`ENABLEECPOLICY`](#Enable_EC_Policy) or [`DISABLEECPOLICY`](#Disable_EC_Policy)
 
 ### Start After
 

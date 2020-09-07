@@ -24,7 +24,12 @@ import org.junit.Test;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.apache.hadoop.test.LambdaTestUtils.*;
 import static org.apache.hadoop.test.GenericTestUtils.*;
@@ -123,6 +128,27 @@ public class TestLambdaTestUtils extends Assert {
         minCount <= retry.getInvocationCount());
   }
 
+  /**
+   * Raise an exception.
+   * @param e exception to raise
+   * @return never
+   * @throws Exception passed in exception
+   */
+  private boolean r(Exception e) throws Exception {
+    throw e;
+  }
+
+  /**
+   * Raise an error.
+   * @param e error to raise
+   * @return never
+   * @throws Exception never
+   * @throws Error the passed in error
+   */
+  private boolean r(Error e) throws Exception {
+    throw e;
+  }
+
   @Test
   public void testAwaitAlwaysTrue() throws Throwable {
     await(TIMEOUT,
@@ -140,7 +166,7 @@ public class TestLambdaTestUtils extends Assert {
           TIMEOUT_FAILURE_HANDLER);
       fail("should not have got here");
     } catch (TimeoutException e) {
-      assertTrue(retry.getInvocationCount() > 4);
+      assertMinRetryCount(1);
     }
   }
 
@@ -316,9 +342,7 @@ public class TestLambdaTestUtils extends Assert {
     IOException ioe = intercept(IOException.class,
         () -> await(
             TIMEOUT,
-            () -> {
-              throw new IOException("inner " + ++count);
-            },
+            () -> r(new IOException("inner " + ++count)),
             retry,
             (timeout, ex) -> ex));
     assertRetryCount(count - 1);
@@ -339,9 +363,7 @@ public class TestLambdaTestUtils extends Assert {
   public void testInterceptAwaitFailFastLambda() throws Throwable {
     intercept(FailFastException.class,
         () -> await(TIMEOUT,
-            () -> {
-              throw new FailFastException("ffe");
-            },
+            () -> r(new FailFastException("ffe")),
             retry,
             (timeout, ex) -> ex));
     assertRetryCount(0);
@@ -361,14 +383,13 @@ public class TestLambdaTestUtils extends Assert {
     assertRetryCount(0);
   }
 
+
   @Test
   public void testInterceptEventuallyLambdaFailures() throws Throwable {
     intercept(IOException.class,
         "oops",
         () -> eventually(TIMEOUT,
-            () -> {
-              throw new IOException("oops");
-            },
+            () -> r(new IOException("oops")),
             retry));
     assertMinRetryCount(1);
   }
@@ -385,11 +406,219 @@ public class TestLambdaTestUtils extends Assert {
     intercept(FailFastException.class, "oops",
         () -> eventually(
             TIMEOUT,
-            () -> {
-              throw new FailFastException("oops");
-            },
+            () -> r(new FailFastException("oops")),
             retry));
     assertRetryCount(0);
+  }
+
+  /**
+   * Verify that assertions trigger catch and retry.
+   * @throws Throwable if the code is broken
+   */
+  @Test
+  public void testEventuallySpinsOnAssertions() throws Throwable {
+    AtomicInteger counter = new AtomicInteger(0);
+    eventually(TIMEOUT,
+        () -> {
+          while (counter.incrementAndGet() < 5) {
+            fail("if you see this, we are in trouble");
+          }
+        },
+        retry);
+    assertMinRetryCount(4);
+  }
+
+  /**
+   * Verify that VirtualMachineError errors are immediately rethrown.
+   * @throws Throwable if the code is broken
+   */
+  @Test
+  public void testInterceptEventuallyThrowsVMErrors() throws Throwable {
+    intercept(OutOfMemoryError.class, "OOM",
+        () -> eventually(
+            TIMEOUT,
+            () -> r(new OutOfMemoryError("OOM")),
+            retry));
+    assertRetryCount(0);
+  }
+
+  /**
+   * Verify that you can declare that an intercept will intercept Errors.
+   * @throws Throwable if the code is broken
+   */
+  @Test
+  public void testInterceptHandlesErrors() throws Throwable {
+    intercept(OutOfMemoryError.class, "OOM",
+        () -> r(new OutOfMemoryError("OOM")));
+  }
+
+  /**
+   * Verify that if an Error raised is not the one being intercepted,
+   * it gets rethrown.
+   * @throws Throwable if the code is broken
+   */
+  @Test
+  public void testInterceptRethrowsVMErrors() throws Throwable {
+    intercept(StackOverflowError.class, "",
+        () -> intercept(OutOfMemoryError.class, "",
+            () -> r(new StackOverflowError())));
+  }
+
+  @Test
+  public void testAwaitHandlesAssertions() throws Throwable {
+    // await a state which is never reached, expect a timeout exception
+    // with the text "failure" in it
+    TimeoutException ex = intercept(TimeoutException.class,
+        "failure",
+        () -> await(TIMEOUT,
+            () -> r(new AssertionError("failure")),
+            retry,
+            TIMEOUT_FAILURE_HANDLER));
+
+    // the retry handler must have been invoked
+    assertMinRetryCount(1);
+    // and the nested cause is tha raised assertion
+    if (!(ex.getCause() instanceof AssertionError)) {
+      throw ex;
+    }
+  }
+
+  @Test
+  public void testAwaitRethrowsVMErrors() throws Throwable {
+    // await a state which is never reached, expect a timeout exception
+    // with the text "failure" in it
+    intercept(StackOverflowError.class,
+        () -> await(TIMEOUT,
+            () -> r(new StackOverflowError()),
+            retry,
+            TIMEOUT_FAILURE_HANDLER));
+
+    // the retry handler must not have been invoked
+    assertMinRetryCount(0);
+  }
+
+  @Test
+  public void testEvalToSuccess() {
+    assertTrue("Eval to success", eval(() -> true));
+  }
+
+  /**
+   * There's no attempt to wrap an unchecked exception
+   * with an AssertionError.
+   */
+  @Test
+  public void testEvalDoesntWrapRTEs() throws Throwable {
+    intercept(RuntimeException.class, "",
+        () -> eval(() -> {
+          throw new RuntimeException("t");
+        }));
+  }
+
+  /**
+   * Verify that IOEs are caught and wrapped, and that the
+   * inner cause is the original IOE.
+   */
+  @Test
+  public void testEvalDoesWrapIOEs() throws Throwable {
+    verifyCause(IOException.class,
+        intercept(AssertionError.class, "ioe",
+          () -> eval(() -> {
+            throw new IOException("ioe");
+          })));
+  }
+
+  @Test
+  public void testInterceptFutureUnwrapped() throws Throwable {
+    CompletableFuture<String> future = new CompletableFuture<>();
+    future.completeExceptionally(new IOException("oops"));
+    interceptFuture(IOException.class, "oops", future);
+  }
+
+  @Test
+  public void testInterceptFutureWrongException() throws Throwable {
+    CompletableFuture<String> future = new CompletableFuture<>();
+    future.completeExceptionally(new RuntimeException("oops"));
+    intercept(RuntimeException.class,
+        "oops",
+        () -> interceptFuture(IOException.class, "", future));
+  }
+
+  @Test
+  public void testInterceptFutureNotAnException() throws Throwable {
+    CompletableFuture<String> future = new CompletableFuture<>();
+    future.completeExceptionally(new Error("oops"));
+    verifyCause(Error.class,
+        intercept(ExecutionException.class,
+            "oops",
+            () -> interceptFuture(IOException.class, "", future)));
+  }
+
+  /**
+   * Variant for exception catching.
+   */
+  @Test
+  public void testInterceptFutureNotAnException2() throws Throwable {
+    CompletableFuture<String> future = new CompletableFuture<>();
+    future.completeExceptionally(new Error("oops"));
+    verifyCause(Error.class,
+        interceptFuture(ExecutionException.class, "", future));
+  }
+
+  @Test
+  public void testInterceptFutureNoFailures() throws Throwable {
+    CompletableFuture<String> future = new CompletableFuture<>();
+    future.complete("happy");
+    intercept(AssertionError.class,
+        "happy",
+        () -> interceptFuture(IOException.class, "oops", future));
+  }
+
+  /**
+   * This will timeout immediately and raise a TimeoutException.
+   */
+  @Test
+  public void testInterceptFutureTimeout() throws Throwable {
+    CompletableFuture<String> future = new CompletableFuture<>();
+    intercept(TimeoutException.class,
+        "",
+        () -> interceptFuture(IOException.class, "oops",
+            1, TimeUnit.NANOSECONDS,
+            future));
+  }
+
+  /**
+   * This will timeout immediately and raise a TimeoutException.
+   */
+  @Test
+  public void testInterceptFutureTimeout2() throws Throwable {
+    CompletableFuture<String> future = new CompletableFuture<>();
+    interceptFuture(TimeoutException.class, "",
+            1, TimeUnit.NANOSECONDS,
+            future);
+  }
+
+  /**
+   * This will timeout immediately and raise a TimeoutException.
+   */
+  @Test
+  public void testInterceptFutureTimeoutSuccess() throws Throwable {
+    CompletableFuture<String> future = new CompletableFuture<>();
+    future.completeExceptionally(new IOException("oops"));
+    interceptFuture(IOException.class, "oops",
+        1, TimeUnit.NANOSECONDS,
+        future);
+  }
+
+  /**
+   * This will timeout immediately and raise a TimeoutException.
+   */
+  @Test
+  public void testInterceptFutureCancelled() throws Throwable {
+    CompletableFuture<String> future = new CompletableFuture<>();
+    future.cancel(false);
+    interceptFuture(CancellationException.class, "",
+        1, TimeUnit.NANOSECONDS,
+        future);
   }
 
 }

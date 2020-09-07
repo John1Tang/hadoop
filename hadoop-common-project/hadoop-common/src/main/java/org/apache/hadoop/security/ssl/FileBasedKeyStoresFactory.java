@@ -18,19 +18,20 @@
 package org.apache.hadoop.security.ssl;
 
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManager;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.text.MessageFormat;
@@ -38,7 +39,7 @@ import java.text.MessageFormat;
 /**
  * {@link KeyStoresFactory} implementation that reads the certificates from
  * keystore files.
- * <p/>
+ * <p>
  * if the trust certificates keystore file changes, the {@link TrustManager}
  * is refreshed with the new trust certificate entries (using a
  * {@link ReloadingX509TrustManager} trustmanager).
@@ -47,8 +48,8 @@ import java.text.MessageFormat;
 @InterfaceStability.Evolving
 public class FileBasedKeyStoresFactory implements KeyStoresFactory {
 
-  private static final Log LOG =
-    LogFactory.getLog(FileBasedKeyStoresFactory.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(FileBasedKeyStoresFactory.class);
 
   public static final String SSL_KEYSTORE_LOCATION_TPL_KEY =
     "ssl.{0}.keystore.location";
@@ -87,7 +88,7 @@ public class FileBasedKeyStoresFactory implements KeyStoresFactory {
 
   /**
    * Resolves a property name to its client/server version if applicable.
-   * <p/>
+   * <p>
    * NOTE: This method is public for testing purposes.
    *
    * @param mode client/server mode.
@@ -170,7 +171,7 @@ public class FileBasedKeyStoresFactory implements KeyStoresFactory {
         LOG.debug(mode.toString() + " KeyStore: " + keystoreLocation);
       }
 
-      InputStream is = new FileInputStream(keystoreLocation);
+      InputStream is = Files.newInputStream(Paths.get(keystoreLocation));
       try {
         keystore.load(is, keystorePassword.toCharArray());
       } finally {

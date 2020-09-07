@@ -62,8 +62,8 @@ import static org.apache.hadoop.hdfs.server.datanode.FileIoProvider.OPERATION.*;
  *
  * Behavior can be injected into these events by enabling the
  * profiling and/or fault injection event hooks through
- * {@link DFSConfigKeys#DFS_DATANODE_FILEIO_PROFILING_SAMPLING_FRACTION_KEY} and
- * {@link DFSConfigKeys#DFS_DATANODE_ENABLE_FILEIO_FAULT_INJECTION_KEY}.
+ * {@link DFSConfigKeys#DFS_DATANODE_FILEIO_PROFILING_SAMPLING_PERCENTAGE_KEY}
+ * and {@link DFSConfigKeys#DFS_DATANODE_ENABLE_FILEIO_FAULT_INJECTION_KEY}.
  * These event hooks are disabled by default.
  *
  * Most functions accept an optional {@link FsVolumeSpi} parameter for
@@ -149,7 +149,24 @@ public class FileIoProvider {
     final long begin = profilingEventHook.beforeFileIo(volume, SYNC, 0);
     try {
       faultInjectorEventHook.beforeFileIo(volume, SYNC, 0);
-      fos.getChannel().force(true);
+      IOUtils.fsync(fos.getChannel(), false);
+      profilingEventHook.afterFileIo(volume, SYNC, begin, 0);
+    } catch (Exception e) {
+      onFailure(volume, begin);
+      throw e;
+    }
+  }
+
+  /**
+   * Sync the given directory changes to durable device.
+   * @throws IOException
+   */
+  public void dirSync(@Nullable FsVolumeSpi volume, File dir)
+      throws IOException {
+    final long begin = profilingEventHook.beforeFileIo(volume, SYNC, 0);
+    try {
+      faultInjectorEventHook.beforeFileIo(volume, SYNC, 0);
+      IOUtils.fsync(dir);
       profilingEventHook.afterFileIo(volume, SYNC, begin, 0);
     } catch (Exception e) {
       onFailure(volume, begin);
@@ -161,7 +178,6 @@ public class FileIoProvider {
    * Call sync_file_range on the given file descriptor.
    *
    * @param  volume target volume. null if unavailable.
-   * @throws IOException
    */
   public void syncFileRange(
       @Nullable FsVolumeSpi volume, FileDescriptor outFd,
@@ -181,7 +197,6 @@ public class FileIoProvider {
    * Call posix_fadvise on the given file descriptor.
    *
    * @param  volume target volume. null if unavailable.
-   * @throws IOException
    */
   public void posixFadvise(
       @Nullable FsVolumeSpi volume, String identifier, FileDescriptor outFd,
@@ -264,7 +279,15 @@ public class FileIoProvider {
           waitTime, transferTime);
       profilingEventHook.afterFileIo(volume, TRANSFER, begin, count);
     } catch (Exception e) {
-      onFailure(volume, begin);
+      String em = e.getMessage();
+      if (em != null) {
+        if (!em.startsWith("Broken pipe")
+            && !em.startsWith("Connection reset")) {
+          onFailure(volume, begin);
+        }
+      } else {
+        onFailure(volume, begin);
+      }
       throw e;
     }
   }
@@ -377,7 +400,6 @@ public class FileIoProvider {
    * @param volume  target volume. null if unavailable.
    * @param fd  File descriptor object.
    * @return  FileOutputStream to the given file object.
-   * @throws  FileNotFoundException
    */
   public FileOutputStream getFileOutputStream(
       @Nullable FsVolumeSpi volume, FileDescriptor fd) {

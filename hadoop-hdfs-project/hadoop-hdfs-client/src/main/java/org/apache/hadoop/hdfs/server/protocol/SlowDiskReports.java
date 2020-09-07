@@ -48,7 +48,7 @@ public final class SlowDiskReports {
   private final Map<String, Map<DiskOp, Double>> slowDisks;
 
   /**
-   * An object representing a SlowPeerReports with no entries. Should
+   * An object representing a SlowDiskReports with no entries. Should
    * be used instead of null or creating new objects when there are
    * no slow peers to report.
    */
@@ -101,8 +101,9 @@ public final class SlowDiskReports {
     }
 
     boolean areEqual;
-    for (String disk : this.slowDisks.keySet()) {
-      if (!this.slowDisks.get(disk).equals(that.slowDisks.get(disk))) {
+    for (Map.Entry<String, Map<DiskOp, Double>> entry : this.slowDisks
+        .entrySet()) {
+      if (!entry.getValue().equals(that.slowDisks.get(entry.getKey()))) {
         return false;
       }
     }
@@ -119,8 +120,28 @@ public final class SlowDiskReports {
    * Lists the types of operations on which disk latencies are measured.
    */
   public enum DiskOp {
-    METADATA,
-    READ,
-    WRITE
+    METADATA("MetadataOp"),
+    READ("ReadIO"),
+    WRITE("WriteIO");
+
+    private final String value;
+
+    DiskOp(final String v) {
+      this.value = v;
+    }
+
+    @Override
+    public String toString() {
+      return value;
+    }
+
+    public static DiskOp fromValue(final String value) {
+      for (DiskOp as : DiskOp.values()) {
+        if (as.value.equals(value)) {
+          return as;
+        }
+      }
+      return null;
+    }
   }
 }

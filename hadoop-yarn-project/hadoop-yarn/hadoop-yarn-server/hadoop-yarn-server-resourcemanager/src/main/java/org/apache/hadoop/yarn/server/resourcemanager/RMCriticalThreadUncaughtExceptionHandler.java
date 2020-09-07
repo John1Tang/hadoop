@@ -20,10 +20,10 @@ package org.apache.hadoop.yarn.server.resourcemanager;
 
 import java.lang.Thread.UncaughtExceptionHandler;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
-import org.apache.hadoop.yarn.conf.HAUtil;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 
 /**
  * This class either shuts down {@link ResourceManager} or transitions the
@@ -35,7 +35,7 @@ import org.apache.hadoop.yarn.conf.HAUtil;
 @Private
 public class RMCriticalThreadUncaughtExceptionHandler
     implements UncaughtExceptionHandler {
-  private static final Log LOG = LogFactory.getLog(
+  private static final Logger LOG = LoggerFactory.getLogger(
       RMCriticalThreadUncaughtExceptionHandler.class);
   private final RMContext rmContext;
 
@@ -45,14 +45,19 @@ public class RMCriticalThreadUncaughtExceptionHandler
 
   @Override
   public void uncaughtException(Thread t, Throwable e) {
-    LOG.fatal("Critical thread " + t.getName() + " crashed!", e);
+    Exception ex;
 
-    if (HAUtil.isHAEnabled(rmContext.getYarnConfiguration())) {
-      rmContext.getResourceManager().handleTransitionToStandByInNewThread();
+    if (e instanceof Exception) {
+      ex = (Exception)e;
     } else {
-      rmContext.getDispatcher().getEventHandler().handle(
-          new RMFatalEvent(RMFatalEventType.CRITICAL_THREAD_CRASH,
-              new Exception(e)));
+      ex = new YarnException(e);
     }
+
+    RMFatalEvent event =
+        new RMFatalEvent(RMFatalEventType.CRITICAL_THREAD_CRASH, ex,
+            String.format("a critical thread, %s, that exited unexpectedly",
+                t.getName()));
+
+    rmContext.getDispatcher().getEventHandler().handle(event);
   }
 }

@@ -43,6 +43,8 @@ import com.microsoft.azure.storage.StorageException;
 import com.microsoft.azure.storage.blob.CloudBlobClient;
 import com.microsoft.azure.storage.blob.CloudBlobContainer;
 import com.microsoft.azure.storage.blob.CloudBlockBlob;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /***
  * Local SAS Key Generation implementation. This class resides in
@@ -54,15 +56,21 @@ import com.microsoft.azure.storage.blob.CloudBlockBlob;
 
 public class LocalSASKeyGeneratorImpl extends SASKeyGeneratorImpl {
 
+  public static final Logger LOG = LoggerFactory.getLogger(
+      LocalSASKeyGeneratorImpl.class);
+
   /**
    * Map to cache CloudStorageAccount instances.
    */
   private Map<String, CloudStorageAccount> storageAccountMap;
-
+  private CachingAuthorizer<CachedSASKeyEntry, URI> cache;
   private static final int HOURS_IN_DAY = 24;
+
   public LocalSASKeyGeneratorImpl(Configuration conf) {
     super(conf);
     storageAccountMap = new HashMap<String, CloudStorageAccount>();
+    cache = new CachingAuthorizer<>(getSasKeyExpiryPeriod(), "SASKEY");
+    cache.init(conf);
   }
 
   /**
@@ -72,13 +80,22 @@ public class LocalSASKeyGeneratorImpl extends SASKeyGeneratorImpl {
   public URI getContainerSASUri(String accountName, String container)
       throws SASKeyGenerationException {
 
+    LOG.debug("Retrieving Container SAS URI For {}@{}", container, accountName);
     try {
+
+      CachedSASKeyEntry cacheKey = new CachedSASKeyEntry(accountName, container, "/");
+      URI cacheResult = cache.get(cacheKey);
+      if (cacheResult != null) {
+        return cacheResult;
+      }
 
       CloudStorageAccount account =
           getSASKeyBasedStorageAccountInstance(accountName);
       CloudBlobClient client = account.createCloudBlobClient();
-      return client.getCredentials().transformUri(
+      URI sasKey = client.getCredentials().transformUri(
           client.getContainerReference(container).getUri());
+      cache.put(cacheKey, sasKey);
+      return sasKey;
 
     } catch (StorageException stoEx) {
       throw new SASKeyGenerationException("Encountered StorageException while"
@@ -102,7 +119,7 @@ public class LocalSASKeyGeneratorImpl extends SASKeyGeneratorImpl {
    */
   private CloudStorageAccount getSASKeyBasedStorageAccountInstance(
       String accountName) throws SASKeyGenerationException {
-
+    LOG.debug("Creating SAS key from account instance {}", accountName);
     try {
 
       String accountNameWithoutDomain =
@@ -146,7 +163,16 @@ public class LocalSASKeyGeneratorImpl extends SASKeyGeneratorImpl {
 
     CloudBlobContainer sc = null;
     CloudBlobClient client = null;
+    CachedSASKeyEntry cacheKey = null;
+
     try {
+
+      cacheKey = new CachedSASKeyEntry(accountName, container, relativePath);
+      URI cacheResult = cache.get(cacheKey);
+      if (cacheResult != null) {
+        return cacheResult;
+      }
+
       CloudStorageAccount account =
           getSASKeyBasedStorageAccountInstance(accountName);
       client = account.createCloudBlobClient();
@@ -175,7 +201,9 @@ public class LocalSASKeyGeneratorImpl extends SASKeyGeneratorImpl {
     }
 
     try {
-      return client.getCredentials().transformUri(blob.getUri());
+      URI sasKey = client.getCredentials().transformUri(blob.getUri());
+      cache.put(cacheKey, sasKey);
+      return sasKey;
     } catch (StorageException stoEx) {
       throw new SASKeyGenerationException("Encountered StorageException while "
           + "generating SAS key for Blob: " + relativePath + " inside "
@@ -201,6 +229,10 @@ public class LocalSASKeyGeneratorImpl extends SASKeyGeneratorImpl {
       String accountKey) throws SASKeyGenerationException {
 
     if (!storageAccountMap.containsKey(accountName)) {
+      if (accountKey == null || accountKey.isEmpty()) {
+        throw new SASKeyGenerationException(
+            "No key for Storage account " + accountName);
+      }
 
       CloudStorageAccount account = null;
       try {

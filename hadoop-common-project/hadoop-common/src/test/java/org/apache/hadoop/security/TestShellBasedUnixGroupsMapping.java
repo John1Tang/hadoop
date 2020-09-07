@@ -20,8 +20,6 @@ package org.apache.hadoop.security;
 import java.io.IOException;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -30,6 +28,8 @@ import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.Shell.ExitCodeException;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.*;
 import static org.mockito.Mockito.doNothing;
@@ -38,8 +38,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 public class TestShellBasedUnixGroupsMapping {
-  private static final Log TESTLOG =
-      LogFactory.getLog(TestShellBasedUnixGroupsMapping.class);
+  private static final Logger TESTLOG =
+      LoggerFactory.getLogger(TestShellBasedUnixGroupsMapping.class);
 
   private final GenericTestUtils.LogCapturer shellMappingLog =
       GenericTestUtils.LogCapturer.captureLogs(
@@ -173,6 +173,37 @@ public class TestShellBasedUnixGroupsMapping {
     assertTrue(groups.contains("zzz"));
   }
 
+  public long getTimeoutInterval(String timeout) {
+    Configuration conf = new Configuration();
+    String userName = "foobarnonexistinguser";
+    conf.set(
+        CommonConfigurationKeys.HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_KEY,
+        timeout);
+    TestDelayedGroupCommand mapping = ReflectionUtils
+        .newInstance(TestDelayedGroupCommand.class, conf);
+    ShellCommandExecutor executor = mapping.createGroupExecutor(userName);
+    return executor.getTimeoutInterval();
+  }
+
+  @Test
+  public void testShellTimeOutConf() {
+
+    // Test a 1 second max-runtime timeout
+    assertEquals(
+        "Expected the group names executor to carry the configured timeout",
+        1000L, getTimeoutInterval("1s"));
+
+    // Test a 1 minute max-runtime timeout
+    assertEquals(
+        "Expected the group names executor to carry the configured timeout",
+        60000L, getTimeoutInterval("1m"));
+
+    // Test a 1 millisecond max-runtime timeout
+    assertEquals(
+        "Expected the group names executor to carry the configured timeout",
+        1L, getTimeoutInterval("1"));
+  }
+
   private class TestGroupResolvable
       extends ShellBasedUnixGroupsMapping {
     /**
@@ -222,7 +253,7 @@ public class TestShellBasedUnixGroupsMapping {
   private static class TestDelayedGroupCommand
       extends ShellBasedUnixGroupsMapping {
 
-    private Long timeoutSecs = 2L;
+    private Long timeoutSecs = 1L;
 
     TestDelayedGroupCommand() {
       super();
@@ -249,12 +280,12 @@ public class TestShellBasedUnixGroupsMapping {
     String userName = "foobarnonexistinguser";
     String commandTimeoutMessage =
         "ran longer than the configured timeout limit";
-    long testTimeout = 1L;
+    long testTimeout = 500L;
 
     // Test a 1 second max-runtime timeout
     conf.setLong(
         CommonConfigurationKeys.
-            HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_SECS,
+            HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_KEY,
         testTimeout);
 
     TestDelayedGroupCommand mapping =
@@ -306,7 +337,7 @@ public class TestShellBasedUnixGroupsMapping {
     conf = new Configuration();
     long defaultTimeout =
         CommonConfigurationKeys.
-            HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_SECS_DEFAULT;
+            HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_DEFAULT;
 
     mapping =
         ReflectionUtils.newInstance(TestDelayedGroupCommand.class, conf);

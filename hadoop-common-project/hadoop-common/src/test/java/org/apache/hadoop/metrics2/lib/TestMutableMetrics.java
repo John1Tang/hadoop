@@ -23,8 +23,8 @@ import static org.apache.hadoop.test.MetricsAsserts.*;
 import static org.mockito.AdditionalMatchers.eq;
 import static org.mockito.AdditionalMatchers.geq;
 import static org.mockito.AdditionalMatchers.leq;
-import static org.mockito.Matchers.anyLong;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.junit.Assert.*;
@@ -34,18 +34,19 @@ import java.util.Map.Entry;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import org.apache.hadoop.metrics2.util.Quantile;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test metrics record builder interface and mutable metrics
  */
 public class TestMutableMetrics {
 
-  private static final Log LOG = LogFactory.getLog(TestMutableMetrics.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestMutableMetrics.class);
   private final double EPSILON = 1e-42;
 
   /**
@@ -59,6 +60,7 @@ public class TestMutableMetrics {
     registry.newCounter("c2", "long counter", 2L);
     registry.newGauge("g1", "int gauge", 3);
     registry.newGauge("g2", "long gauge", 4L);
+    registry.newGauge("g3", "float gauge", 5f);
     registry.newStat("s1", "stat", "Ops", "Time", true).add(0);
     registry.newRate("s2", "stat", false).add(0);
 
@@ -74,6 +76,7 @@ public class TestMutableMetrics {
     verify(mb).addCounter(info("c2", "long counter"), 2L);
     verify(mb).addGauge(info("g1", "int gauge"), 3);
     verify(mb).addGauge(info("g2", "long gauge"), 4L);
+    verify(mb).addGauge(info("g3", "float gauge"), 5f);
     verify(mb).addCounter(info("S1NumOps", "Number of ops for stat"), 1L);
     verify(mb).addGauge(eq(info("S1AvgTime", "Average time for stat")),
                            eq(0.0, EPSILON));
@@ -138,6 +141,19 @@ public class TestMutableMetrics {
     MutableRatesWithAggregation rates = new MutableRatesWithAggregation();
 
     rates.init(TestProtocol.class);
+    rates.snapshot(rb, false);
+
+    assertCounter("FooNumOps", 0L, rb);
+    assertGauge("FooAvgTime", 0.0, rb);
+    assertCounter("BarNumOps", 0L, rb);
+    assertGauge("BarAvgTime", 0.0, rb);
+  }
+
+  @Test public void testMutableRatesWithAggregationInitWithArray() {
+    MetricsRecordBuilder rb = mockMetricsRecordBuilder();
+    MutableRatesWithAggregation rates = new MutableRatesWithAggregation();
+
+    rates.init(new String[]{"Foo", "Bar"});
     rates.snapshot(rb, false);
 
     assertCounter("FooNumOps", 0L, rb);
@@ -269,6 +285,23 @@ public class TestMutableMetrics {
       double avgTime = getDoubleGauge("Metric" + i + "AvgTime", rb);
       opTotalTime[i] += avgTime * (newOpCount - prevOpCount);
     }
+  }
+
+  @Test
+  public void testDuplicateMetrics() {
+    MutableRatesWithAggregation rates = new MutableRatesWithAggregation();
+    MutableRatesWithAggregation deferredRpcRates =
+        new MutableRatesWithAggregation();
+    Class<?> protocol = Long.class;
+    rates.init(protocol);
+    deferredRpcRates.init(protocol, "Deferred");
+    MetricsRecordBuilder rb = mockMetricsRecordBuilder();
+    rates.snapshot(rb, true);
+    deferredRpcRates.snapshot(rb, true);
+    verify(rb, times(1))
+        .addCounter(info("GetLongNumOps", "Number of ops for getLong"), 0L);
+    verify(rb, times(1)).addCounter(
+        info("GetLongDeferredNumOps", "Number of ops for getLongDeferred"), 0L);
   }
 
   /**

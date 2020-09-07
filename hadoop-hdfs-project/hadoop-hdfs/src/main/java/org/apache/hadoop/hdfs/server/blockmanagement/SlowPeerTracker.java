@@ -21,6 +21,7 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.primitives.Ints;
@@ -28,6 +29,7 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.server.protocol.SlowPeerReports;
 import org.apache.hadoop.util.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,6 +72,10 @@ public class SlowPeerTracker {
   private final Timer timer;
 
   /**
+   * ObjectWriter to convert JSON reports to String.
+   */
+  private static final ObjectWriter WRITER = new ObjectMapper().writer();
+  /**
    * Number of nodes to include in JSON report. We will return nodes with
    * the highest number of votes from peers.
    */
@@ -77,7 +83,7 @@ public class SlowPeerTracker {
 
   /**
    * Information about peers that have reported a node as being slow.
-   * Each outer map entry is a map of (DatanodeId) -> (timestamp),
+   * Each outer map entry is a map of (DatanodeId) {@literal ->} (timestamp),
    * mapping reporting nodes to the timestamp of the last report from
    * that node.
    *
@@ -141,7 +147,7 @@ public class SlowPeerTracker {
   /**
    * Retrieve all reports for all nodes. Stale reports are excluded.
    *
-   * @return map from SlowNodeId -> (set of nodes reporting peers).
+   * @return map from SlowNodeId {@literal ->} (set of nodes reporting peers).
    */
   public Map<String, SortedSet<String>> getReportsForAllDataNodes() {
     if (allReports.isEmpty()) {
@@ -188,9 +194,8 @@ public class SlowPeerTracker {
   public String getJson() {
     Collection<ReportForJson> validReports = getJsonReports(
         MAX_NODES_TO_REPORT);
-    ObjectMapper objectMapper = new ObjectMapper();
     try {
-      return objectMapper.writeValueAsString(validReports);
+      return WRITER.writeValueAsString(validReports);
     } catch (JsonProcessingException e) {
       // Failed to serialize. Don't log the exception call stack.
       LOG.debug("Failed to serialize statistics" + e);

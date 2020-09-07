@@ -16,10 +16,22 @@
  * limitations under the License.
  */
 
-
 import Ember from 'ember';
-import ColumnDef from 'em-table/utils/column-definition';
+import TableDefinition from 'em-table/utils/table-definition';
 import AppTableController from '../app-table-columns';
 
 export default AppTableController.extend({
+  queryParams: ['searchText', 'sortColumnId', 'sortOrder', 'pageNum', 'rowCount'],
+  tableDefinition: TableDefinition.create({
+    searchType: 'manual',
+    enableFaceting: true,
+    rowCount: 25,
+    sortColumnId: 'stTime',
+    sortOrder: 'desc'
+  }),
+  searchText: Ember.computed.alias('tableDefinition.searchText'),
+  sortColumnId: Ember.computed.alias('tableDefinition.sortColumnId'),
+  sortOrder: Ember.computed.alias('tableDefinition.sortOrder'),
+  pageNum: Ember.computed.alias('tableDefinition.pageNum'),
+  rowCount: Ember.computed.alias('tableDefinition.rowCount')
 });

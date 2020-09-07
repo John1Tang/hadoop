@@ -29,6 +29,7 @@ import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 
 /**
  * Abstract implementation of SystemMetricsPublisher which is then extended by
@@ -118,8 +119,12 @@ public abstract class AbstractSystemMetricsPublisher extends CompositeService
   /**
    * EventType which is used while publishing the events.
    */
-  protected static enum SystemMetricsEventType {
+  protected enum SystemMetricsEventType {
     PUBLISH_ENTITY, PUBLISH_APPLICATION_FINISHED_ENTITY
+  }
+
+  @Override
+  public void appLaunched(RMApp app, long launchTime) {
   }
 
   /**

@@ -18,22 +18,17 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import org.apache.hadoop.fs.InvalidPathException;
-import org.apache.hadoop.fs.ParentNotDirectoryException;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathIsNotEmptyDirectoryException;
-import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
 import org.apache.hadoop.hdfs.server.namenode.INode.ReclaimContext;
-import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.util.ChunkedArrayList;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.SortedSet;
 
 import static org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot.CURRENT_STATE_ID;
 import static org.apache.hadoop.util.Time.now;
@@ -66,10 +61,10 @@ class FSDirDeleteOp {
             removedUCFiles);
         if (unprotectedDelete(fsd, iip, context, mtime)) {
           filesRemoved = context.quotaDelta().getNsDelta();
+          fsn.removeSnapshottableDirs(snapshottableDirs);
         }
         fsd.updateReplicationFactor(context.collectedBlocks()
                                         .toUpdateReplicationInfo());
-        fsn.removeSnapshottableDirs(snapshottableDirs);
         fsd.updateCount(iip, context.quotaDelta(), false);
       }
     } finally {
@@ -88,6 +83,7 @@ class FSDirDeleteOp {
    * For small directory or file the deletion is done in one shot.
    *
    * @param fsn namespace
+   * @param pc FS permission checker
    * @param src path name to be deleted
    * @param recursive boolean true to apply to all sub-directories recursively
    * @param logRetryCache whether to record RPC ids in editlog for retry cache
@@ -96,10 +92,9 @@ class FSDirDeleteOp {
    * @throws IOException
    */
   static BlocksMapUpdateInfo delete(
-      FSNamesystem fsn, String src, boolean recursive, boolean logRetryCache)
-      throws IOException {
+      FSNamesystem fsn, FSPermissionChecker pc, String src, boolean recursive,
+      boolean logRetryCache) throws IOException {
     FSDirectory fsd = fsn.getFSDirectory();
-    FSPermissionChecker pc = fsd.getPermissionChecker();
 
     if (FSDirectory.isExactReservedName(src)) {
       throw new InvalidPathException(src);
@@ -115,7 +110,7 @@ class FSDirDeleteOp {
         throw new PathIsNotEmptyDirectoryException(
             iip.getPath() + " is non empty");
       }
-      checkProtectedDescendants(fsd, iip);
+      DFSUtil.checkProtectedDescendants(fsd, iip);
     }
 
     return deleteInternal(fsn, iip, logRetryCache);
@@ -130,7 +125,7 @@ class FSDirDeleteOp {
    * <br>
    *
    * @param fsd the FSDirectory instance
-   * @param src a string representation of a path to an inode
+   * @param iip inodes of a path to be deleted
    * @param mtime the time the inode is removed
    */
   static void deleteForEditLog(FSDirectory fsd, INodesInPath iip, long mtime)
@@ -149,9 +144,9 @@ class FSDirDeleteOp {
         new ReclaimContext(fsd.getBlockStoragePolicySuite(),
             collectedBlocks, removedINodes, removedUCFiles),
         mtime);
-    fsn.removeSnapshottableDirs(snapshottableDirs);
 
     if (filesRemoved) {
+      fsn.removeSnapshottableDirs(snapshottableDirs);
       fsn.removeLeasesAndINodes(removedUCFiles, removedINodes, false);
       fsn.getBlockManager().removeBlocksAndUpdateSafemodeTotal(collectedBlocks);
     }
@@ -270,46 +265,5 @@ class FSDirDeleteOp {
           + iip.getPath() + " is removed");
     }
     return true;
-  }
-
-  /**
-   * Throw if the given directory has any non-empty protected descendants
-   * (including itself).
-   *
-   * @param iip directory whose descendants are to be checked.
-   * @throws AccessControlException if a non-empty protected descendant
-   *                                was found.
-   * @throws ParentNotDirectoryException
-   * @throws UnresolvedLinkException
-   * @throws FileNotFoundException
-   */
-  private static void checkProtectedDescendants(
-      FSDirectory fsd, INodesInPath iip)
-          throws AccessControlException, UnresolvedLinkException,
-          ParentNotDirectoryException {
-    final SortedSet<String> protectedDirs = fsd.getProtectedDirectories();
-    if (protectedDirs.isEmpty()) {
-      return;
-    }
-
-    String src = iip.getPath();
-    // Is src protected? Caller has already checked it is non-empty.
-    if (protectedDirs.contains(src)) {
-      throw new AccessControlException(
-          "Cannot delete non-empty protected directory " + src);
-    }
-
-    // Are any descendants of src protected?
-    // The subSet call returns only the descendants of src since
-    // {@link Path#SEPARATOR} is "/" and '0' is the next ASCII
-    // character after '/'.
-    for (String descendant :
-            protectedDirs.subSet(src + Path.SEPARATOR, src + "0")) {
-      INodesInPath subdirIIP = fsd.getINodesInPath(descendant, DirOp.WRITE);
-      if (fsd.isNonEmptyDirectory(subdirIIP)) {
-        throw new AccessControlException(
-            "Cannot delete non-empty protected subdirectory " + descendant);
-      }
-    }
   }
 }

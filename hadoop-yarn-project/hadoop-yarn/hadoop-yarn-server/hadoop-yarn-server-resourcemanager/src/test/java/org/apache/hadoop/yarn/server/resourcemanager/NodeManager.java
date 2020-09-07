@@ -26,6 +26,10 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.yarn.api.protocolrecords.CommitResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.ContainerUpdateRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.ContainerUpdateResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetLocalizationStatusesRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetLocalizationStatusesResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.IncreaseContainersResourceRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.IncreaseContainersResourceResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.ReInitializeContainerRequest;
@@ -35,8 +39,8 @@ import org.apache.hadoop.yarn.api.protocolrecords.ResourceLocalizationResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.RestartContainerResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.RollbackResponse;
 import org.junit.Assert;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.yarn.api.ContainerManagementProtocol;
 import org.apache.hadoop.yarn.api.protocolrecords.GetContainerStatusesRequest;
@@ -72,7 +76,8 @@ import org.apache.hadoop.yarn.util.resource.Resources;
 
 @Private
 public class NodeManager implements ContainerManagementProtocol {
-  private static final Log LOG = LogFactory.getLog(NodeManager.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(NodeManager.class);
   private static final RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
   
   final private String containerManagerAddress;
@@ -93,7 +98,7 @@ public class NodeManager implements ContainerManagementProtocol {
   
   public NodeManager(String hostName, int containerManagerPort, int httpPort,
       String rackName, Resource capability,
-      ResourceManager resourceManager)
+      ResourceManager resourceManager, NodeStatus nodestatus)
       throws IOException, YarnException {
     this.containerManagerAddress = hostName + ":" + containerManagerPort;
     this.nodeHttpAddress = hostName + ":" + httpPort;
@@ -108,6 +113,7 @@ public class NodeManager implements ContainerManagementProtocol {
     request.setResource(capability);
     request.setNodeId(this.nodeId);
     request.setNMVersion(YarnVersionInfo.getVersion());
+    request.setNodeStatus(nodestatus);
     resourceTrackerService.registerNodeManager(request);
     this.resourceManager = resourceManager;
     resourceManager.getResourceScheduler().getNodeReport(this.nodeId);
@@ -207,11 +213,9 @@ public class NodeManager implements ContainerManagementProtocol {
       Resources.subtractFrom(available, tokenId.getResource());
       Resources.addTo(used, tokenId.getResource());
 
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("startContainer:" + " node=" + containerManagerAddress
-            + " application=" + applicationId + " container=" + container
-            + " available=" + available + " used=" + used);
-      }
+      LOG.debug("startContainer: node={} application={} container={}"
+          +" available={} used={}", containerManagerAddress, applicationId,
+          container, available, used);
 
     }
     StartContainersResponse response =
@@ -274,11 +278,9 @@ public class NodeManager implements ContainerManagementProtocol {
       Resources.addTo(available, container.getResource());
       Resources.subtractFrom(used, container.getResource());
 
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("stopContainer:" + " node=" + containerManagerAddress
-            + " application=" + applicationId + " container=" + containerID
-            + " available=" + available + " used=" + used);
-      }
+      LOG.debug("stopContainer: node={} application={} container={}"
+          + " available={} used={}", containerManagerAddress, applicationId,
+          containerID, available, used);
     }
     return StopContainersResponse.newInstance(null,null);
   }
@@ -306,9 +308,16 @@ public class NodeManager implements ContainerManagementProtocol {
   }
 
   @Override
+  @Deprecated
   public IncreaseContainersResourceResponse increaseContainersResource(
       IncreaseContainersResourceRequest request)
           throws YarnException, IOException {
+    return null;
+  }
+
+  @Override
+  public ContainerUpdateResponse updateContainer(ContainerUpdateRequest
+      request) throws YarnException, IOException {
     return null;
   }
 
@@ -359,6 +368,13 @@ public class NodeManager implements ContainerManagementProtocol {
   @Override
   public CommitResponse commitLastReInitialization(ContainerId containerId)
       throws YarnException, IOException {
+    return null;
+  }
+
+  @Override
+  public GetLocalizationStatusesResponse getLocalizationStatuses(
+      GetLocalizationStatusesRequest request) throws YarnException,
+      IOException {
     return null;
   }
 }

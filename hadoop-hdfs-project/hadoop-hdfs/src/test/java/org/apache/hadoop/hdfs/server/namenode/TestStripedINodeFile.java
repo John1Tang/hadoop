@@ -17,17 +17,8 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import static org.apache.hadoop.hdfs.protocol.BlockType.CONTIGUOUS;
-import static org.apache.hadoop.hdfs.protocol.BlockType.STRIPED;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.fail;
-
-import java.io.IOException;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.StorageType;
@@ -42,6 +33,7 @@ import org.apache.hadoop.hdfs.NameNodeProxies;
 import org.apache.hadoop.hdfs.StripedFileTestUtil;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
@@ -50,19 +42,28 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
-import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.rules.Timeout;
 
+import java.io.IOException;
+
+import static org.apache.hadoop.hdfs.protocol.BlockType.CONTIGUOUS;
+import static org.apache.hadoop.hdfs.protocol.BlockType.STRIPED;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 /**
  * This class tests INodeFile with striped feature.
  */
 public class TestStripedINodeFile {
-  public static final Log LOG = LogFactory.getLog(TestINodeFile.class);
+  public static final Logger LOG = LoggerFactory.getLogger(TestINodeFile.class);
 
   private static final PermissionStatus perm = new PermissionStatus(
       "userName", null, FsPermission.getDefault());
@@ -74,19 +75,25 @@ public class TestStripedINodeFile {
 
   // use hard coded policy - see HDFS-9816
   private static final ErasureCodingPolicy testECPolicy
-      = ErasureCodingPolicyManager.getSystemPolicies()[0];
+      = StripedFileTestUtil.getDefaultECPolicy();
 
   @Rule
   public Timeout globalTimeout = new Timeout(300000);
 
   private static INodeFile createStripedINodeFile() {
     return new INodeFile(HdfsConstants.GRANDFATHER_INODE_ID, null, perm, 0L, 0L,
-        null, null, HdfsConstants.RS_6_3_POLICY_ID, 1024L,
+        null, null, StripedFileTestUtil.getDefaultECPolicy().getId(), 1024L,
         HdfsConstants.COLD_STORAGE_POLICY_ID, BlockType.STRIPED);
   }
 
   @Rule
   public ExpectedException thrown = ExpectedException.none();
+
+  @Before
+  public void init() throws IOException {
+    Configuration conf = new HdfsConfiguration();
+    ErasureCodingPolicyManager.getInstance().init(conf);
+  }
 
   @Test
   public void testInvalidECPolicy() throws IllegalArgumentException {
@@ -118,7 +125,7 @@ public class TestStripedINodeFile {
     try {
       new INodeFile(HdfsConstants.GRANDFATHER_INODE_ID,
           null, perm, 0L, 0L, null, new Short((short) 3) /*replication*/,
-          HdfsConstants.RS_6_3_POLICY_ID /*ec policy*/,
+          StripedFileTestUtil.getDefaultECPolicy().getId() /*ec policy*/,
           1024L, HdfsConstants.WARM_STORAGE_POLICY_ID, STRIPED);
       fail("INodeFile construction should fail when both replication and " +
           "ECPolicy requested!");
@@ -147,7 +154,7 @@ public class TestStripedINodeFile {
       LOG.info("Expected exception: ", iae);
     }
 
-    final Byte ecPolicyID = HdfsConstants.RS_6_3_POLICY_ID;
+    final Byte ecPolicyID = StripedFileTestUtil.getDefaultECPolicy().getId();
     try {
       new INodeFile(HdfsConstants.GRANDFATHER_INODE_ID,
           null, perm, 0L, 0L, null, null /*replication*/, ecPolicyID,
@@ -311,8 +318,6 @@ public class TestStripedINodeFile {
       final short GROUP_SIZE = (short) (testECPolicy.getNumDataUnits() +
           testECPolicy.getNumParityUnits());
       conf.setInt(DFSConfigKeys.DFS_NAMENODE_MAX_XATTRS_PER_INODE_KEY, 2);
-      conf.set(DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_ENABLED_KEY,
-          StripedFileTestUtil.getDefaultECPolicy().getName());
 
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(GROUP_SIZE)
           .build();
@@ -320,6 +325,8 @@ public class TestStripedINodeFile {
 
       FSNamesystem fsn = cluster.getNamesystem();
       dfs = cluster.getFileSystem();
+      dfs.enableErasureCodingPolicy(
+          StripedFileTestUtil.getDefaultECPolicy().getName());
       dfs.mkdirs(ecDir);
 
       // set erasure coding policy
@@ -388,8 +395,6 @@ public class TestStripedINodeFile {
         1L);
     conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_CONSIDERLOAD_KEY,
         false);
-    conf.set(DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_ENABLED_KEY,
-        StripedFileTestUtil.getDefaultECPolicy().getName());
 
     // start 10 datanodes
     int numOfDatanodes = 10;
@@ -419,6 +424,8 @@ public class TestStripedINodeFile {
 
     try {
       cluster.waitActive();
+      cluster.getFileSystem().enableErasureCodingPolicy(
+          StripedFileTestUtil.getDefaultECPolicy().getName());
 
       // set "/foo" directory with ONE_SSD storage policy.
       ClientProtocol client = NameNodeProxies.createProxy(conf,

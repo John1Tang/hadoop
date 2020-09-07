@@ -18,8 +18,8 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
@@ -33,6 +33,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerImpl
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ActiveUsersManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.ContainerRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
 
@@ -42,7 +43,8 @@ import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import java.util.List;
 
 public class FifoAppAttempt extends FiCaSchedulerApp {
-  private static final Log LOG = LogFactory.getLog(FifoAppAttempt.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(FifoAppAttempt.class);
 
   FifoAppAttempt(ApplicationAttemptId appAttemptId, String user,
       Queue queue, ActiveUsersManager activeUsersManager,
@@ -52,9 +54,9 @@ public class FifoAppAttempt extends FiCaSchedulerApp {
 
   public RMContainer allocate(NodeType type, FiCaSchedulerNode node,
       SchedulerRequestKey schedulerKey, Container container) {
-    try {
-      writeLock.lock();
 
+    writeLock.lock();
+    try {
       if (isStopped) {
         return null;
       }
@@ -80,14 +82,14 @@ public class FifoAppAttempt extends FiCaSchedulerApp {
       liveContainers.put(containerId, rmContainer);
 
       // Update consumption and track allocations
-      List<ResourceRequest> resourceRequestList = appSchedulingInfo.allocate(
-          type, node, schedulerKey, container);
+      ContainerRequest containerRequest = appSchedulingInfo.allocate(
+            type, node, schedulerKey, rmContainer);
 
       attemptResourceUsage.incUsed(node.getPartition(),
           container.getResource());
 
       // Update resource requests related to "request" and store in RMContainer
-      ((RMContainerImpl) rmContainer).setResourceRequests(resourceRequestList);
+      ((RMContainerImpl) rmContainer).setContainerRequest(containerRequest);
 
       // Inform the container
       rmContainer.handle(
@@ -98,9 +100,17 @@ public class FifoAppAttempt extends FiCaSchedulerApp {
             .getApplicationAttemptId() + " container=" + containerId + " host="
             + container.getNodeId().getHost() + " type=" + type);
       }
+      // In order to save space in the audit log, only include the partition
+      // if it is not the default partition.
+      String partition = null;
+      if (appAMNodePartitionName != null &&
+            !appAMNodePartitionName.isEmpty()) {
+        partition = appAMNodePartitionName;
+      }
       RMAuditLogger.logSuccess(getUser(),
           RMAuditLogger.AuditConstants.ALLOC_CONTAINER, "SchedulerApp",
-          getApplicationId(), containerId, container.getResource());
+          getApplicationId(), containerId, container.getResource(),
+          getQueueName(), partition);
 
       return rmContainer;
     } finally {

@@ -23,12 +23,14 @@ import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
+import org.apache.hadoop.yarn.api.records.LocalizationStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NMContainerStatus;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ResourceSet;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerExecutionException;
 
 import java.util.List;
 import java.util.Map;
@@ -37,11 +39,21 @@ public interface Container extends EventHandler<ContainerEvent> {
 
   ContainerId getContainerId();
 
+  /**
+   * The timestamp when the container start request is received.
+   */
+  long getContainerStartTime();
+
+  /**
+   * The timestamp when the container is allowed to be launched.
+   */
+  long getContainerLaunchTime();
+
   Resource getResource();
 
-  void setResource(Resource targetResource);
-
   ContainerTokenIdentifier getContainerTokenIdentifier();
+
+  void setContainerTokenIdentifier(ContainerTokenIdentifier token);
 
   String getUser();
   
@@ -65,11 +77,17 @@ public interface Container extends EventHandler<ContainerEvent> {
 
   void setWorkDir(String workDir);
 
+  String getCsiVolumesRootDir();
+
+  void setCsiVolumesRootDir(String volumesRootDir);
+
   String getLogDir();
 
   void setLogDir(String logDir);
 
   void setIpAndHost(String[] ipAndHost);
+
+  void setExposedPorts(String ports);
 
   String toString();
 
@@ -94,4 +112,40 @@ public interface Container extends EventHandler<ContainerEvent> {
   void sendKillEvent(int exitStatus, String description);
 
   boolean isRecovering();
+
+  void setContainerRuntimeData(Object containerRuntimeData);
+
+  <T> T getContainerRuntimeData(Class<T> runtimeClazz)
+      throws ContainerExecutionException;
+
+  /**
+   * Get assigned resource mappings to the container.
+   *
+   * @return Resource Mappings of the container
+   */
+  ResourceMappings getResourceMappings();
+
+  void sendPauseEvent(String description);
+
+  /**
+   * Verify container is in final states.
+   * @return true/false based on container's state
+   */
+  boolean isContainerInFinalStates();
+
+  /**
+   * Get the localization statuses.
+   * @return localization statuses.
+   */
+  List<LocalizationStatus> getLocalizationStatuses();
+
+  /**
+   * Vector of localization counters to be passed from NM to application
+   * container via environment variable {@code $LOCALIZATION_COUNTERS}. See
+   * {@link org.apache.hadoop.yarn.api.ApplicationConstants.Environment#LOCALIZATION_COUNTERS}
+   *
+   * @return coma-separated counter values
+   */
+  String localizationCountersAsString();
+
 }

@@ -19,13 +19,15 @@ package org.apache.hadoop.hdfs.server.namenode;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Stack;
 
 import com.google.common.base.Preconditions;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.ipc.CallerContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.fs.FSExceptionMessages;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.permission.AclEntryScope;
@@ -44,10 +46,10 @@ import org.apache.hadoop.security.UserGroupInformation;
  * The state of this class need not be synchronized as it has data structures that
  * are read-only.
  * 
- * Some of the helper methods are gaurded by {@link FSNamesystem#readLock()}.
+ * Some of the helper methods are guarded by {@link FSNamesystem#readLock()}.
  */
-class FSPermissionChecker implements AccessControlEnforcer {
-  static final Log LOG = LogFactory.getLog(UserGroupInformation.class);
+public class FSPermissionChecker implements AccessControlEnforcer {
+  static final Logger LOG = LoggerFactory.getLogger(UserGroupInformation.class);
 
   private static String getPath(byte[][] components, int start, int end) {
     return DFSUtil.byteArray2PathString(components, start, end - start + 1);
@@ -84,18 +86,41 @@ class FSPermissionChecker implements AccessControlEnforcer {
   private final Collection<String> groups;
   private final boolean isSuper;
   private final INodeAttributeProvider attributeProvider;
+  private final boolean authorizeWithContext;
 
+  private static ThreadLocal<String> operationType = new ThreadLocal<>();
 
-  FSPermissionChecker(String fsOwner, String supergroup,
+  protected FSPermissionChecker(String fsOwner, String supergroup,
       UserGroupInformation callerUgi,
       INodeAttributeProvider attributeProvider) {
+    this(fsOwner, supergroup, callerUgi, attributeProvider, false);
+  }
+
+  protected FSPermissionChecker(String fsOwner, String supergroup,
+      UserGroupInformation callerUgi,
+      INodeAttributeProvider attributeProvider,
+      boolean useAuthorizationWithContextAPI) {
     this.fsOwner = fsOwner;
     this.supergroup = supergroup;
     this.callerUgi = callerUgi;
-    this.groups = callerUgi.getGroups();
+    this.groups = callerUgi.getGroupsSet();
     user = callerUgi.getShortUserName();
     isSuper = user.equals(fsOwner) || groups.contains(supergroup);
     this.attributeProvider = attributeProvider;
+
+    if (attributeProvider == null) {
+      // If attribute provider is null, use FSPermissionChecker default
+      // implementation to authorize, which supports authorization with context.
+      authorizeWithContext = true;
+      LOG.debug("Default authorization provider supports the new authorization" +
+          " provider API");
+    } else {
+      authorizeWithContext = useAuthorizationWithContextAPI;
+    }
+  }
+
+  public static void setOperationType(String opType) {
+    operationType.set(opType);
   }
 
   public boolean isMemberOfGroup(String group) {
@@ -183,16 +208,104 @@ class FSPermissionChecker implements AccessControlEnforcer {
     final INodeAttributes[] inodeAttrs = new INodeAttributes[inodes.length];
     final byte[][] components = inodesInPath.getPathComponents();
     for (int i = 0; i < inodes.length && inodes[i] != null; i++) {
-      inodeAttrs[i] = getINodeAttrs(components, i, inodes[i], snapshotId);
+      inodeAttrs[i] = getINodeAttrs(inodes[i], snapshotId);
     }
 
     String path = inodesInPath.getPath();
     int ancestorIndex = inodes.length - 2;
 
     AccessControlEnforcer enforcer = getAccessControlEnforcer();
-    enforcer.checkPermission(fsOwner, supergroup, callerUgi, inodeAttrs, inodes,
-        components, snapshotId, path, ancestorIndex, doCheckOwner,
-        ancestorAccess, parentAccess, access, subAccess, ignoreEmptyDir);
+
+    String opType = operationType.get();
+    if (this.authorizeWithContext && opType != null) {
+      INodeAttributeProvider.AuthorizationContext.Builder builder =
+          new INodeAttributeProvider.AuthorizationContext.Builder();
+      builder.fsOwner(fsOwner).
+          supergroup(supergroup).
+          callerUgi(callerUgi).
+          inodeAttrs(inodeAttrs).
+          inodes(inodes).
+          pathByNameArr(components).
+          snapshotId(snapshotId).
+          path(path).
+          ancestorIndex(ancestorIndex).
+          doCheckOwner(doCheckOwner).
+          ancestorAccess(ancestorAccess).
+          parentAccess(parentAccess).
+          access(access).
+          subAccess(subAccess).
+          ignoreEmptyDir(ignoreEmptyDir).
+          operationName(opType).
+          callerContext(CallerContext.getCurrent());
+      enforcer.checkPermissionWithContext(builder.build());
+    } else {
+      enforcer.checkPermission(fsOwner, supergroup, callerUgi, inodeAttrs,
+          inodes, components, snapshotId, path, ancestorIndex, doCheckOwner,
+          ancestorAccess, parentAccess, access, subAccess, ignoreEmptyDir);
+    }
+
+  }
+
+  /**
+   * Check permission only for the given inode (not checking the children's
+   * access).
+   *
+   * @param inode the inode to check.
+   * @param snapshotId the snapshot id.
+   * @param access the target access.
+   * @throws AccessControlException
+   */
+  void checkPermission(INode inode, int snapshotId, FsAction access)
+      throws AccessControlException {
+    byte[][] pathComponents = inode.getPathComponents();
+    INodeAttributes nodeAttributes = getINodeAttrs(inode, snapshotId);
+    try {
+      INodeAttributes[] iNodeAttr = {nodeAttributes};
+      AccessControlEnforcer enforcer = getAccessControlEnforcer();
+      String opType = operationType.get();
+      if (this.authorizeWithContext && opType != null) {
+        INodeAttributeProvider.AuthorizationContext.Builder builder =
+            new INodeAttributeProvider.AuthorizationContext.Builder();
+        builder.fsOwner(fsOwner)
+            .supergroup(supergroup)
+            .callerUgi(callerUgi)
+            .inodeAttrs(iNodeAttr) // single inode attr in the array
+            .inodes(new INode[] { inode }) // single inode attr in the array
+            .pathByNameArr(pathComponents)
+            .snapshotId(snapshotId)
+            .path(null)
+            .ancestorIndex(-1)     // this will skip checkTraverse()
+                                   // because not checking ancestor here
+            .doCheckOwner(false)
+            .ancestorAccess(null)
+            .parentAccess(null)
+            .access(access)        // the target access to be checked against
+                                   // the inode
+            .subAccess(null)       // passing null sub access avoids checking
+                                   // children
+            .ignoreEmptyDir(false)
+            .operationName(opType)
+            .callerContext(CallerContext.getCurrent());
+
+        enforcer.checkPermissionWithContext(builder.build());
+      } else {
+        enforcer.checkPermission(
+            fsOwner, supergroup, callerUgi,
+            iNodeAttr, // single inode attr in the array
+            new INode[]{inode}, // single inode in the array
+            pathComponents, snapshotId,
+            null, -1, // this will skip checkTraverse() because
+            // not checking ancestor here
+            false, null, null,
+            access, // the target access to be checked against the inode
+            null, // passing null sub access avoids checking children
+            false);
+      }
+    } catch (AccessControlException ace) {
+      throw new AccessControlException(
+          toAccessControlString(nodeAttributes, inode.getFullPathName(),
+              access));
+    }
   }
 
   @Override
@@ -238,15 +351,47 @@ class FSPermissionChecker implements AccessControlEnforcer {
     }
   }
 
-  private INodeAttributes getINodeAttrs(byte[][] pathByNameArr, int pathIdx,
-      INode inode, int snapshotId) {
+  @Override
+  public void checkPermissionWithContext(
+      INodeAttributeProvider.AuthorizationContext authzContext)
+      throws AccessControlException {
+    // The default authorization provider does not use the additional context
+    // parameters including operationName and callerContext.
+    this.checkPermission(authzContext.getFsOwner(),
+        authzContext.getSupergroup(), authzContext.getCallerUgi(),
+        authzContext.getInodeAttrs(), authzContext.getInodes(),
+        authzContext.getPathByNameArr(), authzContext.getSnapshotId(),
+        authzContext.getPath(), authzContext.getAncestorIndex(),
+        authzContext.isDoCheckOwner(), authzContext.getAncestorAccess(),
+        authzContext.getParentAccess(), authzContext.getAccess(),
+        authzContext.getSubAccess(), authzContext.isIgnoreEmptyDir());
+  }
+
+  private INodeAttributes getINodeAttrs(INode inode, int snapshotId) {
     INodeAttributes inodeAttrs = inode.getSnapshotINode(snapshotId);
+    /**
+     * This logic is similar to {@link FSDirectory#getAttributes()} and it
+     * ensures that the attribute provider sees snapshot paths resolved to their
+     * original location. This means the attributeProvider can apply permissions
+     * to the snapshot paths in the same was as the live paths. See HDFS-15372.
+     */
     if (getAttributesProvider() != null) {
-      String[] elements = new String[pathIdx + 1];
-      for (int i = 0; i < elements.length; i++) {
-        elements[i] = DFSUtil.bytes2String(pathByNameArr[i]);
-      }
-      inodeAttrs = getAttributesProvider().getAttributes(elements, inodeAttrs);
+      /**
+       * If we have an inode representing a path like /d/.snapshot/snap1
+       * then calling inode.getPathComponents returns [null, d, snap1]. If we
+       * call inode.getFullPathName() it will return /d/.snapshot/snap1. For
+       * this special path (snapshot root) the attribute provider should see:
+       *
+       * [null, d, .snapshot/snap1]
+       *
+       * Using IIP.resolveFromRoot, it will take the inode fullPathName and
+       * construct an IIP object that give the correct components as above.
+       */
+      INodesInPath iip = INodesInPath.resolveFromRoot(inode);
+      byte[][] components = iip.getPathComponents();
+      components = Arrays.copyOfRange(components, 1, components.length);
+      inodeAttrs = getAttributesProvider()
+          .getAttributes(components, inodeAttrs);
     }
     return inodeAttrs;
   }
@@ -302,7 +447,7 @@ class FSPermissionChecker implements AccessControlEnforcer {
       if (!(cList.isEmpty() && ignoreEmptyDir)) {
         //TODO have to figure this out with inodeattribute provider
         INodeAttributes inodeAttr =
-            getINodeAttrs(components, pathIdx, d, snapshotId);
+            getINodeAttrs(d, snapshotId);
         if (!hasPermission(inodeAttr, access)) {
           throw new AccessControlException(
               toAccessControlString(inodeAttr, d.getFullPathName(), access));
@@ -320,7 +465,7 @@ class FSPermissionChecker implements AccessControlEnforcer {
         if (inodeAttr.getFsPermission().getStickyBit()) {
           for (INode child : cList) {
             INodeAttributes childInodeAttr =
-                getINodeAttrs(components, pathIdx, child, snapshotId);
+                getINodeAttrs(child, snapshotId);
             if (isStickyBitViolated(inodeAttr, childInodeAttr)) {
               List<byte[]> allComponentList = new ArrayList<>();
               for (int i = 0; i <= pathIdx; ++i) {
@@ -369,7 +514,7 @@ class FSPermissionChecker implements AccessControlEnforcer {
     }
     final FsPermission mode = inode.getFsPermission();
     final AclFeature aclFeature = inode.getAclFeature();
-    if (aclFeature != null) {
+    if (aclFeature != null && aclFeature.getEntriesSize() > 0) {
       // It's possible that the inode has a default ACL but no access ACL.
       int firstEntry = aclFeature.getEntryAt(0);
       if (AclEntryStatusFormat.getScope(firstEntry) == AclEntryScope.ACCESS) {
@@ -533,7 +678,9 @@ class FSPermissionChecker implements AccessControlEnforcer {
         && mode.getGroupAction().implies(access)) {
       return;
     }
-    if (mode.getOtherAction().implies(access)) {
+    if (!getUser().equals(pool.getOwnerName())
+        && !isMemberOfGroup(pool.getGroupName())
+        && mode.getOtherAction().implies(access)) {
       return;
     }
     throw new AccessControlException("Permission denied while accessing pool "

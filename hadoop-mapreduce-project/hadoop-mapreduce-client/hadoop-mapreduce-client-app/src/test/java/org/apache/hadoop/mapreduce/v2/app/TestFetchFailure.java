@@ -18,13 +18,15 @@
 
 package org.apache.hadoop.mapreduce.v2.app;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
+import java.util.concurrent.atomic.AtomicReference;
 
-import com.google.common.base.Supplier;
+import java.util.function.Supplier;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.mapred.TaskCompletionEvent;
 import org.apache.hadoop.mapreduce.Counters;
@@ -355,8 +357,8 @@ public class TestFetchFailure {
     Assert.assertEquals("Map TaskAttempt state not correct",
         TaskAttemptState.FAILED, mapAttempt1.getState());
 
-    Assert.assertEquals(mapAttempt1.getDiagnostics().get(0),
-            "Too many fetch failures. Failing the attempt. "
+    assertThat(mapAttempt1.getDiagnostics().get(0))
+        .isEqualTo("Too many fetch failures. Failing the attempt. "
             + "Last failure reported by "
             + reduceAttempt3.getID().toString() + " from host host3");
 
@@ -442,7 +444,7 @@ public class TestFetchFailure {
     status.stateString = "OK";
     status.taskState = attempt.getState();
     TaskAttemptStatusUpdateEvent event = new TaskAttemptStatusUpdateEvent(attempt.getID(),
-        status);
+        new AtomicReference<>(status));
     app.getContext().getEventHandler().handle(event);
   }
 

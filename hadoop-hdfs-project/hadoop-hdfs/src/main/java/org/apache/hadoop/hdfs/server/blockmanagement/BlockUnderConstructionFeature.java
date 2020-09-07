@@ -60,7 +60,7 @@ public class BlockUnderConstructionFeature {
   /**
    * The block source to use in the event of copy-on-write truncate.
    */
-  private Block truncateBlock;
+  private BlockInfo truncateBlock;
 
   public BlockUnderConstructionFeature(Block blk,
       BlockUCState state, DatanodeStorageInfo[] targets, BlockType blockType) {
@@ -193,11 +193,11 @@ public class BlockUnderConstructionFeature {
   }
 
   /** Get recover block */
-  public Block getTruncateBlock() {
+  public BlockInfo getTruncateBlock() {
     return truncateBlock;
   }
 
-  public void setTruncateBlock(Block recoveryBlock) {
+  public void setTruncateBlock(BlockInfo recoveryBlock) {
     this.truncateBlock = recoveryBlock;
   }
 
@@ -223,10 +223,17 @@ public class BlockUnderConstructionFeature {
    * Initialize lease recovery for this block.
    * Find the first alive data-node starting from the previous primary and
    * make it primary.
+   * @param blockInfo Block to be recovered
+   * @param recoveryId Recovery ID (new gen stamp)
+   * @param startRecovery Issue recovery command to datanode if true.
    */
-  public void initializeBlockRecovery(BlockInfo blockInfo, long recoveryId) {
+  public void initializeBlockRecovery(BlockInfo blockInfo, long recoveryId,
+      boolean startRecovery) {
     setBlockUCState(BlockUCState.UNDER_RECOVERY);
     blockRecoveryId = recoveryId;
+    if (!startRecovery) {
+      return;
+    }
     if (replicas.length == 0) {
       NameNode.blockStateChangeLog.warn("BLOCK*" +
           " BlockUnderConstructionFeature.initializeBlockRecovery:" +

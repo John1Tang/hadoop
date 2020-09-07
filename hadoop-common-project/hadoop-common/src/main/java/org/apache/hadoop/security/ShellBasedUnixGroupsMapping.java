@@ -18,15 +18,17 @@
 package org.apache.hadoop.security;
 
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.LinkedList;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.StringTokenizer;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -52,8 +54,9 @@ public class ShellBasedUnixGroupsMapping extends Configured
   protected static final Logger LOG =
       LoggerFactory.getLogger(ShellBasedUnixGroupsMapping.class);
 
-  private long timeout = 0L;
-  private static final List<String> EMPTY_GROUPS = new LinkedList<>();
+  private long timeout = CommonConfigurationKeys.
+      HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_DEFAULT;
+  private static final Set<String> EMPTY_GROUPS_SET = Collections.emptySet();
 
   @Override
   public void setConf(Configuration conf) {
@@ -61,10 +64,10 @@ public class ShellBasedUnixGroupsMapping extends Configured
     if (conf != null) {
       timeout = conf.getTimeDuration(
           CommonConfigurationKeys.
-              HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_SECS,
+              HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_KEY,
           CommonConfigurationKeys.
-              HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_SECS_DEFAULT,
-          TimeUnit.SECONDS);
+              HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_DEFAULT,
+          TimeUnit.MILLISECONDS);
     }
   }
 
@@ -94,7 +97,7 @@ public class ShellBasedUnixGroupsMapping extends Configured
    */
   @Override
   public List<String> getGroups(String userName) throws IOException {
-    return getUnixGroups(userName);
+    return new ArrayList(getUnixGroups(userName));
   }
 
   /**
@@ -113,6 +116,11 @@ public class ShellBasedUnixGroupsMapping extends Configured
   @Override
   public void cacheGroupsAdd(List<String> groups) throws IOException {
     // does nothing in this provider of user to groups mapping
+  }
+
+  @Override
+  public Set<String> getGroupsSet(String userName) throws IOException {
+    return getUnixGroups(userName);
   }
 
   /**
@@ -158,6 +166,32 @@ public class ShellBasedUnixGroupsMapping extends Configured
   }
 
   /**
+   * Check if the executor had a timeout and logs the event.
+   * @param executor to check
+   * @param user user to log
+   * @return true if timeout has occurred
+   */
+  private boolean handleExecutorTimeout(
+      ShellCommandExecutor executor,
+      String user) {
+    // If its a shell executor timeout, indicate so in the message
+    // but treat the result as empty instead of throwing it up,
+    // similar to how partial resolution failures are handled above
+    if (executor.isTimedOut()) {
+      LOG.warn(
+          "Unable to return groups for user '{}' as shell group lookup " +
+              "command '{}' ran longer than the configured timeout limit of " +
+              "{} seconds.",
+          user,
+          Joiner.on(' ').join(executor.getExecString()),
+          timeout
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Get the current user's group list from Unix by running the command 'groups'
    * NOTE. For non-existing user it will return EMPTY list.
    *
@@ -166,51 +200,33 @@ public class ShellBasedUnixGroupsMapping extends Configured
    *         group is returned first.
    * @throws IOException if encounter any error when running the command
    */
-  private List<String> getUnixGroups(String user) throws IOException {
+  private Set<String> getUnixGroups(String user) throws IOException {
     ShellCommandExecutor executor = createGroupExecutor(user);
 
-    List<String> groups;
+    Set<String> groups;
     try {
       executor.execute();
       groups = resolveFullGroupNames(executor.getOutput());
     } catch (ExitCodeException e) {
-      try {
-        groups = resolvePartialGroupNames(user, e.getMessage(),
-            executor.getOutput());
-      } catch (PartialGroupNameException pge) {
-        LOG.warn("unable to return groups for user {}", user, pge);
-        return EMPTY_GROUPS;
+      if (handleExecutorTimeout(executor, user)) {
+        return EMPTY_GROUPS_SET;
+      } else {
+        try {
+          groups = resolvePartialGroupNames(user, e.getMessage(),
+              executor.getOutput());
+        } catch (PartialGroupNameException pge) {
+          LOG.warn("unable to return groups for user {}", user, pge);
+          return EMPTY_GROUPS_SET;
+        }
       }
     } catch (IOException ioe) {
-      // If its a shell executor timeout, indicate so in the message
-      // but treat the result as empty instead of throwing it up,
-      // similar to how partial resolution failures are handled above
-      if (executor.isTimedOut()) {
-        LOG.warn(
-            "Unable to return groups for user '{}' as shell group lookup " +
-            "command '{}' ran longer than the configured timeout limit of " +
-            "{} seconds.",
-            user,
-            Joiner.on(' ').join(executor.getExecString()),
-            timeout
-        );
-        return EMPTY_GROUPS;
+      if (handleExecutorTimeout(executor, user)) {
+        return EMPTY_GROUPS_SET;
       } else {
         // If its not an executor timeout, we should let the caller handle it
         throw ioe;
       }
     }
-
-    // remove duplicated primary group
-    if (!Shell.WINDOWS) {
-      for (int i = 1; i < groups.size(); i++) {
-        if (groups.get(i).equals(groups.get(0))) {
-          groups.remove(i);
-          break;
-        }
-      }
-    }
-
     return groups;
   }
 
@@ -223,13 +239,13 @@ public class ShellBasedUnixGroupsMapping extends Configured
    * @return a linked list of group names
    * @throws PartialGroupNameException
    */
-  private List<String> parsePartialGroupNames(String groupNames,
+  private Set<String> parsePartialGroupNames(String groupNames,
       String groupIDs) throws PartialGroupNameException {
     StringTokenizer nameTokenizer =
         new StringTokenizer(groupNames, Shell.TOKEN_SEPARATOR_REGEX);
     StringTokenizer idTokenizer =
         new StringTokenizer(groupIDs, Shell.TOKEN_SEPARATOR_REGEX);
-    List<String> groups = new LinkedList<String>();
+    Set<String> groups = new LinkedHashSet<>();
     while (nameTokenizer.hasMoreTokens()) {
       // check for unresolvable group names.
       if (!idTokenizer.hasMoreTokens()) {
@@ -258,10 +274,10 @@ public class ShellBasedUnixGroupsMapping extends Configured
    * @param userName the user's name
    * @param errMessage error message from the shell command
    * @param groupNames the incomplete list of group names
-   * @return a list of resolved group names
+   * @return a set of resolved group names
    * @throws PartialGroupNameException if the resolution fails or times out
    */
-  private List<String> resolvePartialGroupNames(String userName,
+  private Set<String> resolvePartialGroupNames(String userName,
       String errMessage, String groupNames) throws PartialGroupNameException {
     // Exception may indicate that some group names are not resolvable.
     // Shell-based implementation should tolerate unresolvable groups names,
@@ -303,16 +319,16 @@ public class ShellBasedUnixGroupsMapping extends Configured
   }
 
   /**
-   * Split group names into a linked list.
+   * Split group names into a set.
    *
    * @param groupNames a string representing the user's group names
-   * @return a linked list of group names
+   * @return a set of group names
    */
   @VisibleForTesting
-  protected List<String> resolveFullGroupNames(String groupNames) {
+  protected Set<String> resolveFullGroupNames(String groupNames) {
     StringTokenizer tokenizer =
         new StringTokenizer(groupNames, Shell.TOKEN_SEPARATOR_REGEX);
-    List<String> groups = new LinkedList<String>();
+    Set<String> groups = new LinkedHashSet<>();
     while (tokenizer.hasMoreTokens()) {
       groups.add(tokenizer.nextToken());
     }

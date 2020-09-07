@@ -18,8 +18,8 @@
 
 package org.apache.hadoop.hdfs.server.datanode;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
@@ -37,25 +37,27 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 @InterfaceAudience.Private
 class ProfilingFileIoEvents {
-  static final Log LOG = LogFactory.getLog(ProfilingFileIoEvents.class);
+  static final Logger LOG =
+      LoggerFactory.getLogger(ProfilingFileIoEvents.class);
 
   private final boolean isEnabled;
   private final int sampleRangeMax;
 
   public ProfilingFileIoEvents(@Nullable Configuration conf) {
     if (conf != null) {
-      double fileIOSamplingFraction = conf.getDouble(
-          DFSConfigKeys.DFS_DATANODE_FILEIO_PROFILING_SAMPLING_FRACTION_KEY,
+      int fileIOSamplingPercentage = conf.getInt(
+          DFSConfigKeys.DFS_DATANODE_FILEIO_PROFILING_SAMPLING_PERCENTAGE_KEY,
           DFSConfigKeys
-              .DFS_DATANODE_FILEIO_PROFILING_SAMPLING_FRACTION_DEFAULT);
-      isEnabled = Util.isDiskStatsEnabled(fileIOSamplingFraction);
-      if (fileIOSamplingFraction > 1) {
+              .DFS_DATANODE_FILEIO_PROFILING_SAMPLING_PERCENTAGE_DEFAULT);
+      isEnabled = Util.isDiskStatsEnabled(fileIOSamplingPercentage);
+      if (fileIOSamplingPercentage > 100) {
         LOG.warn(DFSConfigKeys
-            .DFS_DATANODE_FILEIO_PROFILING_SAMPLING_FRACTION_KEY +
-            " value cannot be more than 1. Setting value to 1");
-        fileIOSamplingFraction = 1;
+            .DFS_DATANODE_FILEIO_PROFILING_SAMPLING_PERCENTAGE_KEY +
+            " value cannot be more than 100. Setting value to 100");
+        fileIOSamplingPercentage = 100;
       }
-      sampleRangeMax = (int) (fileIOSamplingFraction * Integer.MAX_VALUE);
+      sampleRangeMax = (int) ((double) fileIOSamplingPercentage / 100 *
+          Integer.MAX_VALUE);
     } else {
       isEnabled = false;
       sampleRangeMax = 0;

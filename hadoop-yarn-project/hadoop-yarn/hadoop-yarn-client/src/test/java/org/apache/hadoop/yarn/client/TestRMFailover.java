@@ -30,16 +30,16 @@ import static org.mockito.Mockito.verify;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.concurrent.TimeoutException;
 
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.ClientBaseWithFixes;
 import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.service.Service.STATE;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.client.api.YarnClient;
@@ -52,6 +52,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.HATestUtil;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.RMCriticalThreadUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
+import org.apache.hadoop.yarn.server.resourcemanager.RMFatalEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.RMFatalEventType;
 import org.apache.hadoop.yarn.server.webproxy.WebAppProxyServer;
 import org.apache.hadoop.yarn.webapp.YarnWebParams;
 import org.junit.After;
@@ -59,9 +61,13 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class TestRMFailover extends ClientBaseWithFixes {
-  private static final Log LOG =
-      LogFactory.getLog(TestRMFailover.class.getName());
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestRMFailover.class.getName());
   private static final HAServiceProtocol.StateChangeRequestInfo req =
       new HAServiceProtocol.StateChangeRequestInfo(
           HAServiceProtocol.RequestSource.REQUEST_BY_USER);
@@ -108,7 +114,7 @@ public class TestRMFailover extends ClientBaseWithFixes {
         client.getApplications();
         return;
       } catch (Exception e) {
-        LOG.error(e);
+        LOG.error(e.toString());
       } finally {
         client.stop();
       }
@@ -159,6 +165,21 @@ public class TestRMFailover extends ClientBaseWithFixes {
     verifyConnections();
   }
 
+  private void verifyRMTransitionToStandby(ResourceManager rm)
+      throws InterruptedException {
+    try {
+      GenericTestUtils.waitFor(new Supplier<Boolean>() {
+        @Override
+        public Boolean get() {
+          return rm.getRMContext().getHAServiceState() ==
+              HAServiceState.STANDBY;
+        }
+      }, 100, 20000);
+    } catch (TimeoutException e) {
+      fail("RM didn't transition to Standby.");
+    }
+  }
+
   @Test
   public void testAutomaticFailover()
       throws YarnException, InterruptedException, IOException {
@@ -181,16 +202,9 @@ public class TestRMFailover extends ClientBaseWithFixes {
     // so it transitions to standby.
     ResourceManager rm = cluster.getResourceManager(
         cluster.getActiveRMIndex());
-    rm.handleTransitionToStandByInNewThread();
-    int maxWaitingAttempts = 2000;
-    while (maxWaitingAttempts-- > 0 ) {
-      if (rm.getRMContext().getHAServiceState() == HAServiceState.STANDBY) {
-        break;
-      }
-      Thread.sleep(1);
-    }
-    Assert.assertFalse("RM didn't transition to Standby ",
-        maxWaitingAttempts == 0);
+    rm.getRMContext().getDispatcher().getEventHandler().handle(
+        new RMFatalEvent(RMFatalEventType.STATE_STORE_FENCED, "test"));
+    verifyRMTransitionToStandby(rm);
     verifyConnections();
   }
 
@@ -280,10 +294,8 @@ public class TestRMFailover extends ClientBaseWithFixes {
     redirectURL = getRedirectURL(rm2Url + "/metrics");
     assertEquals(redirectURL,rm1Url + "/metrics");
 
-    redirectURL = getRedirectURL(rm2Url + "/jmx?param1=value1+x&param2=y");
-    assertEquals(rm1Url + "/jmx?param1=value1+x&param2=y", redirectURL);
 
-    // standby RM links /conf, /stacks, /logLevel, /static, /logs,
+    // standby RM links /conf, /stacks, /logLevel, /static, /logs, /jmx
     // /cluster/cluster as well as webService
     // /ws/v1/cluster/info should not be redirected to active RM
     redirectURL = getRedirectURL(rm2Url + "/cluster/cluster");
@@ -302,6 +314,9 @@ public class TestRMFailover extends ClientBaseWithFixes {
     assertNull(redirectURL);
 
     redirectURL = getRedirectURL(rm2Url + "/logs");
+    assertNull(redirectURL);
+
+    redirectURL = getRedirectURL(rm2Url + "/jmx?param1=value1+x&param2=y");
     assertNull(redirectURL);
 
     redirectURL = getRedirectURL(rm2Url + "/ws/v1/cluster/info");
@@ -393,15 +408,7 @@ public class TestRMFailover extends ClientBaseWithFixes {
     testThread.start();
     testThread.join();
 
-    int maxWaitingAttempts = 2000;
-    while (maxWaitingAttempts-- > 0) {
-      if (resourceManager.getRMContext().getHAServiceState()
-          == HAServiceState.STANDBY) {
-        break;
-      }
-      Thread.sleep(1);
-    }
-    assertFalse("RM didn't transition to Standby ", maxWaitingAttempts < 0);
+    verifyRMTransitionToStandby(resourceManager);
   }
 
   /**
